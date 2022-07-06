@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 export OMP_NUM_THREADS=1
-export CUDA_VISIBLE_DEVICES=1,2,3
+export CUDA_VISIBLE_DEVICES=0
 
 : ${NUM_GPUS:=2}
 : ${BATCH_SIZE:=16}
@@ -87,11 +87,11 @@ ARGS+=" --n-speakers $NSPEAKERS"
 [ "$CWT_ACCENT" = true ]                && ARGS+=" --cwt-accent"
 [ "$LOAD_CWT_FROM_DISK" = true ] && ARGS+=" --load-cwt-from-disk"
 [ "$PITCH_ONLINE_DIR" != "" ]      && ARGS+=" --pitch-online-dir $PITCH_ONLINE_DIR"  # e.g., /dev/shm/pitch
-[ "$PITCH_ONLINE_METHOD" != "" ]   && ARGS+=" --pitch-online-method $PITCH_ONLINE_METHOD"
+#[ "$PITCH_ONLINE_METHOD" != "" ]   && ARGS+=" --pitch-online-method $PITCH_ONLINE_METHOD"
 
-[ "$PITCH_NORM_METHOD" = "default" ]   && ARGS+=" --pitch-online-method $PITCH_NORM_METHOD"
-[ "$PITCH_NORM" = true ]   && ARGS+=" --pitch-online-method $PITCH_NORM"
-[ "$TWO_PASS_METHOD" = false ]   && ARGS+=" --pitch-online-method $TWO_PASS_METHOD"
+#[ "$PITCH_NORM_METHOD" = "pyin" ]   && ARGS+=" --pitch-online-method $PITCH_NORM_METHOD"
+#[ "$PITCH_NORM" = true ]   && ARGS+=" --pitch-online-method $PITCH_NORM"
+#[ "$TWO_PASS_METHOD" = false ]   && ARGS+=" --pitch-online-method $TWO_PASS_METHOD"
 
 
 [ "$APPEND_SPACES" = true ]        && ARGS+=" --prepend-space-to-text"
@@ -112,5 +112,5 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-: ${DISTRIBUTED:="-m torch.distributed.launch --nproc_per_node $NUM_GPUS"}
-python $DISTRIBUTED train.py $ARGS "$@"
+#: ${DISTRIBUTED:="-m torch.distributed.launch --nproc_per_node $NUM_GPUS"}
+python train.py $ARGS "$@"

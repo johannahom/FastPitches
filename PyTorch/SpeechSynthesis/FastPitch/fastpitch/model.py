@@ -36,6 +36,7 @@ from common.utils import mask_from_lens
 from fastpitch.alignment import b_mas, mas_width1
 from fastpitch.attention import ConvAttention
 from fastpitch.transformer import FFTransformer
+from fastpitch.reference_encoder import ReferenceEncoder
 
 
 def regulate_len(durations, enc_out, pace: float = 1.0,
@@ -60,6 +61,7 @@ def regulate_len(durations, enc_out, pace: float = 1.0,
     if mel_max_len is not None:
         enc_rep = enc_rep[:, :mel_max_len]
         dec_lens = torch.clamp_max(dec_lens, mel_max_len)
+
     return enc_rep, dec_lens
 
 
@@ -126,7 +128,8 @@ class FastPitch(nn.Module):
                  energy_predictor_kernel_size, energy_predictor_filter_size,
                  p_energy_predictor_dropout, energy_predictor_n_layers,
                  energy_embedding_kernel_size,
-                 n_speakers, speaker_emb_weight, cwt_accent, pitch_conditioning_formants=1, speaker_independent=False): #@Johannah change here
+                 n_speakers, speaker_emb_weight, cwt_accent, reference_encoder, 
+                 pitch_conditioning_formants=1, speaker_independent=False): #@Johannah change here
         super(FastPitch, self).__init__()
 
         self.encoder = FFTransformer(
@@ -143,13 +146,26 @@ class FastPitch(nn.Module):
             n_embed=n_symbols,
             padding_idx=padding_idx)
 
+        if reference_encoder:
+            ref_embedding_dim = 64
+            self.reference_encoder = ReferenceEncoder(
+                ref_enc_filters=[32,32,64,64,128,128],
+                n_mel_channels=n_mel_channels,
+                ref_enc_gru_size=ref_embedding_dim)
+            # project to symbol embedding dimension
+            self.ref_proj = nn.Linear(ref_embedding_dim, symbols_embedding_dim)
+        else:
+            self.reference_encoder = None
+
         if n_speakers > 1:
-            self.speaker_emb = nn.Embedding(n_speakers, symbols_embedding_dim)
+            self.speaker_emb = nn.Embedding(n_speakers, symbols_embedding_dim) #num_embeddings, size of each embedding vector
         else:
             self.speaker_emb = None
         self.speaker_emb_weight = speaker_emb_weight
+
         # for late speaker conditioning
         self.speaker_independent = speaker_independent
+
         #Embedding for word_level_conditioning
         if cwt_accent == True:
             self.word_level_emb = nn.Embedding(5, symbols_embedding_dim, padding_idx=padding_idx)
@@ -249,7 +265,7 @@ class FastPitch(nn.Module):
     def forward(self, inputs, use_gt_pitch=True, pace=1.0, max_duration=75):
 
         (inputs, input_lens, mel_tgt, mel_lens, pitch_dense, energy_dense,
-         speaker, attn_prior, audiopaths, cwt) = inputs
+         speaker, attn_prior, audiopaths, cwt, ds_mel_tgt, ds_mel_lens) = inputs
 
         mel_max_len = mel_tgt.size(2)
 
@@ -260,18 +276,24 @@ class FastPitch(nn.Module):
             spk_emb = self.speaker_emb(speaker).unsqueeze(1)
             spk_emb.mul_(self.speaker_emb_weight)
 
-        # Add word-level conditioning @Johannah not sure whether to add embedding weight or not 
+        # Add word-level conditioning @Johannah not sure whether to add embedding weight or not
         if self.word_level_emb is None:
             cwt_emb = 0
         else:
             cwt_emb = self.word_level_emb(cwt) 
 
+        # Prosodic embedding conditioning
+        if self.reference_encoder is None:
+            ref_emb = 0
+        else:
+            ref_emb = self.reference_encoder(ds_mel_tgt, ds_mel_lens).unsqueeze(1)
+            ref_emb = self.ref_proj(ref_emb)
+
         # Input FFT - two options speaker dependent or speaker independent
         if self.speaker_independent is True:
-            #print("YESSSSS")
-            enc_out, enc_mask = self.encoder(inputs, word_level_conditioning=cwt_emb)
+            enc_out, enc_mask = self.encoder(inputs, word_level_conditioning=cwt_emb, ref_conditioning=ref_emb)
         else:
-            enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, word_level_conditioning=cwt_emb)
+            enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, word_level_conditioning=cwt_emb, ref_conditioning=ref_emb)
 
         
         # Alignment
@@ -326,9 +348,10 @@ class FastPitch(nn.Module):
             energy_tgt = None
 
 
-        if self.speaker_independent:
-            #print("ADDED HERE")
+        if self.speaker_independent: #not sure if this should be broadcasted or not as they are not the same size!
             enc_out = enc_out + spk_emb
+        
+
 
         len_regulated, dec_lens = regulate_len(
             dur_tgt, enc_out, pace, mel_max_len)
@@ -344,8 +367,9 @@ class FastPitch(nn.Module):
 
     def infer(self, inputs, pace=1.0, dur_tgt=None, pitch_tgt=None,
               energy_tgt=None, pitch_transform=None, max_duration=75,
-              speaker=0, word_level_conditioning=None):#not sure about this but need to input cwt
+              speaker=0, word_level_conditioning=None, reference=None, reference_lens=None, reference_extract=False):#not sure about this but need to input cwt
 
+        # speaker conditioning
         if self.speaker_emb is None:
             spk_emb = 0
         else:
@@ -359,15 +383,23 @@ class FastPitch(nn.Module):
             cwt_emb = 0
         else:
             cwt_emb = self.word_level_emb(word_level_conditioning)
-        print(cwt_emb)
-        # Input FFT
 
-
-        if self.speaker_independent is True:
-            #print("YESSSSS")
-            enc_out, enc_mask = self.encoder(inputs, word_level_conditioning=cwt_emb)
+        if self.reference_encoder is None:
+            ref_emb = 0
         else:
-            enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, word_level_conditioning=cwt_emb)        
+            if reference_extract:
+                ref_emb = self.reference_encoder(reference, reference_lens).unsqueeze(1)
+            else:
+                ref_emb = reference
+            
+            ref_emb = self.ref_proj(ref_emb)
+
+        # Input FFT - two options speaker dependent or speaker independent
+        if self.speaker_independent is True:
+            print("THIS IS TRUE")
+            enc_out, enc_mask = self.encoder(inputs, word_level_conditioning=cwt_emb, ref_conditioning=ref_emb)
+        else:
+            enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, word_level_conditioning=cwt_emb, ref_conditioning=ref_emb)
 
         # Predict durations
         log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)
@@ -406,7 +438,6 @@ class FastPitch(nn.Module):
 
 
         if self.speaker_independent:
-            #print("ADDED HERE")
             enc_out = enc_out + spk_emb
 
         len_regulated, dec_lens = regulate_len(

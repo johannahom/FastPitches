@@ -117,6 +117,8 @@ class TTSDataset(torch.utils.data.Dataset):
                  two_pass_method=False,
                  pitch_norm_method='default',
                  pitch_norm=True,
+                 mels_downsampled=False, #If learning deidentified embeddings
+                 load_ds_mel_from_disk=False, #If already extracted
                  **ignored):
 
         # Expect a list of filenames i.e. train and val
@@ -127,6 +129,7 @@ class TTSDataset(torch.utils.data.Dataset):
         self.audiopaths_and_text = load_filepaths_and_text(
             audiopaths_and_text, dataset_path,
             has_speakers=(n_speakers > 1)) #this now returns a list of dicts
+
         self.load_mel_from_disk = load_mel_from_disk
         if not load_mel_from_disk:
             self.max_wav_value = max_wav_value
@@ -134,6 +137,16 @@ class TTSDataset(torch.utils.data.Dataset):
             self.stft = layers.TacotronSTFT(
                 filter_length, hop_length, win_length,
                 n_mel_channels, sampling_rate, mel_fmin, mel_fmax)
+
+        self.mels_downsampled = mels_downsampled
+        self.load_ds_mel_from_disk = load_ds_mel_from_disk
+        if not load_ds_mel_from_disk and mels_downsampled:
+            self.max_wav_value_ds = max_wav_value
+            self.sampling_rate_ds = 800
+            self.stft_ds = layers.TacotronSTFT(
+                filter_length, 10, 40,
+                n_mel_channels, self.sampling_rate_ds, mel_fmin, 400)
+
         self.load_pitch_from_disk = load_pitch_from_disk
 
         #word level conditioning
@@ -152,6 +165,7 @@ class TTSDataset(torch.utils.data.Dataset):
             self.tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet, get_counts=False)
         
         self.n_speakers = n_speakers
+
         #Pitch extraction parameters
         self.pitch_tmp_dir = pitch_online_dir
         self.f0_method = pitch_online_method
@@ -192,7 +206,6 @@ class TTSDataset(torch.utils.data.Dataset):
         pitch = self.get_pitch(index, mel.size(-1))
         energy = torch.norm(mel.float(), dim=0, p=2)
 #        energy = estimate_energy(mel, norm=True, log=True)
-#        print(energy)
        
         attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
 
@@ -201,9 +214,18 @@ class TTSDataset(torch.utils.data.Dataset):
         else:
             cwt_acc = None
 
+        if self.mels_downsampled:
+            audiopath = self.audiopaths_and_text[index]['mels_ds']
+            ds_mel = self.get_ds_mel(audiopath)
+            #print("DS MELSIZE,", ds_mel.size(-1))
+            #assert ds_mel.size(-1) == mel.size(-1)
+        else:
+            ds_mel = None
+
         #print(pitch.size(-1), mel.size(-1),audiopath)
         assert pitch.size(-1) == mel.size(-1)
         assert energy.size(-1) == energy.size(-1)
+        #print("MELSIZE, ", mel.size(-1))
 
 
         # No higher formants?
@@ -211,13 +233,12 @@ class TTSDataset(torch.utils.data.Dataset):
             pitch = pitch[None, :]
 
         return (text, mel, len(text), pitch, energy, speaker, attn_prior,
-                audiopath, cwt_acc)
+                audiopath, cwt_acc, ds_mel)
 
     def __len__(self):
         return len(self.audiopaths_and_text)
 
     def get_mel(self, filename):
-        print(filename)
         if not self.load_mel_from_disk:
             audio, sampling_rate = load_wav_to_torch(filename)
             if sampling_rate != self.stft.sampling_rate:
@@ -237,12 +258,32 @@ class TTSDataset(torch.utils.data.Dataset):
 
         return melspec
 
+    def get_ds_mel(self, filename):
+        #print(filename)
+        if not self.load_ds_mel_from_disk:
+            audio, sampling_rate = load_wav_to_torch(filename)
+           # print(sampling_rate)
+            if sampling_rate != self.stft_ds.sampling_rate:
+                raise ValueError("{} SR doesn't match target {} SR".format(
+                    sampling_rate, self.stft_ds.sampling_rate))
+            audio_norm = audio / self.max_wav_value
+            audio_norm = audio_norm.unsqueeze(0)
+            audio_norm = torch.autograd.Variable(audio_norm,
+                                                 requires_grad=False)
+            melspec = self.stft_ds.mel_spectrogram(audio_norm)
+            melspec = torch.squeeze(melspec, 0)
+        else:
+            melspec = torch.load(filename)
+
+        return melspec
+
     def get_text(self, text):
         if self.cwt_accent == True:
             text, text_info = self.tp.encode_text(text)
         else:
             text = self.tp.encode_text(text)
             text_info = None
+
         space = [self.tp.encode_text("A A")[1]]
 
         if self.prepend_space_to_text:
@@ -278,7 +319,6 @@ class TTSDataset(torch.utils.data.Dataset):
 
     def get_pitch(self, index, mel_len=None):
         audiopath = self.audiopaths_and_text[index]['mels']
-        #print(audiopath)
         if self.n_speakers > 1:
             spk = int(self.audiopaths_and_text[index]['speaker'])
         else:
@@ -334,6 +374,18 @@ class TTSDataset(torch.utils.data.Dataset):
 
 class TTSCollate:
     """Zero-pads model inputs and targets based on number of frames per step"""
+
+#For reference indices
+#0 text
+#1 mel
+#2 len(text)
+#3 pitch
+#4 energy
+#5 speaker
+#6 attn_prior
+#7 audiopath
+#8 cwt_acc 
+#9 ds_mel
 
     def __call__(self, batch):
         """Collate training batch from normalized text and mel-spec"""
@@ -403,17 +455,35 @@ class TTSCollate:
                 cwt_padded[i, :cwt.size(0)] = cwt
         else:
             cwt_padded = None
-
         #print(cwt_padded.size(), text_padded.size())
+
+        #for downsampled mels
+
+        # Right zero-pad mel-spec #check Johannah
+        if batch[0][9] is not None:
+            num_ds_mels = batch[0][9].size(0)
+            max_target_len_ds = max([x[9].size(1) for x in batch])
+
+#        if batch[0][9] is not None:
+        # Include mel padded and gate padded
+            ds_mel_padded = torch.FloatTensor(len(batch), num_ds_mels, max_target_len_ds)
+            ds_mel_padded.zero_()
+            output_lengths_ds = torch.LongTensor(len(batch))
+            for i in range(len(ids_sorted_decreasing)):
+                ds_mel = batch[ids_sorted_decreasing[i]][9]
+                ds_mel_padded[i, :, :ds_mel.size(1)] = ds_mel
+                output_lengths_ds[i] = ds_mel.size(1)
+        else:
+            ds_mel_padded = None
 
         return (text_padded, input_lengths, mel_padded, output_lengths, len_x,
                 pitch_padded, energy_padded, speaker, attn_prior_padded,
-                audiopaths, cwt_padded)
+                audiopaths, cwt_padded, ds_mel_padded, output_lengths_ds) #
 
 
 def batch_to_gpu(batch):
     (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-     pitch_padded, energy_padded, speaker, attn_prior, audiopaths, cwt_padded) = batch
+     pitch_padded, energy_padded, speaker, attn_prior, audiopaths, cwt_padded, ds_mel_padded, output_lengths_ds) = batch
 
     text_padded = to_gpu(text_padded).long()
     input_lengths = to_gpu(input_lengths).long()
@@ -428,9 +498,12 @@ def batch_to_gpu(batch):
     if cwt_padded is not None:
         cwt_padded = to_gpu(cwt_padded).long()
 
+    if ds_mel_padded is not None:
+        ds_mel_padded = to_gpu(ds_mel_padded).float()
+
     # Alignments act as both inputs and targets - pass shallow copies
     x = [text_padded, input_lengths, mel_padded, output_lengths,
-         pitch_padded, energy_padded, speaker, attn_prior, audiopaths, cwt_padded]
+         pitch_padded, energy_padded, speaker, attn_prior, audiopaths, cwt_padded, ds_mel_padded, output_lengths_ds]
     y = [mel_padded, input_lengths, output_lengths]
     len_x = torch.sum(output_lengths)
     return (x, y, len_x)

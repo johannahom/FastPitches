@@ -146,7 +146,9 @@ def get_model_config(model_name, args):
             energy_conditioning=args.energy_conditioning,
             energy_embedding_kernel_size=args.energy_embedding_kernel_size,
             # word level conditioning
-            cwt_accent=args.cwt_accent # @Johannah not sure
+            cwt_accent=args.cwt_accent,
+            # reference encoder conditioning
+            reference_encoder=args.reference_encoder
                         
         )
         return model_config

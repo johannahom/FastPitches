@@ -171,6 +171,13 @@ def parse_args(parser):
                       help='Use CWT cache on the disk')
     cond.add_argument('--cwt-accent', action='store_true',
                       help='Enable CWT Accent Conditioning') #Can be used for any word level conditioning
+    cond.add_argument('--reference-encoder', action='store_true',
+                      help='Enable Prosodic Embedding Conditioning')
+    cond.add_argument('--mels-downsampled', action='store_true',
+                      help='Using downsampled mels for reference encoder') #Can be used for any word level conditioning
+    cond.add_argument('--load-ds-mel-from-disk', action='store_true',
+                      help='Use downsampled mels cache on the disk')
+
 
     audio = parser.add_argument_group('audio parameters')
     audio.add_argument('--max-wav-value', default=32768.0, type=float,
@@ -381,7 +388,7 @@ def plot_batch_mels(pred_tgt_lists, rank):
 def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
-                'speaker', 'attn_prior', 'audiopaths', 'cwt_padded']
+                'speaker', 'attn_prior', 'audiopaths', 'cwt_padded', 'ds_mel_padded', 'output_lengths_ds']
     y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
@@ -530,6 +537,11 @@ def main():
 
     model_config = models.get_model_config('FastPitch', args) # @Johannah change here
     model = models.get_model('FastPitch', model_config, device) # @Johannah change here
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    params = sum([np.prod(p.size()) for p in model_parameters])
+    print("model parameters:", params)
+
+
     attention_kl_loss = AttentionBinarizationLoss()
 
     if args.local_rank == 0:

@@ -50,6 +50,8 @@ def parse_args(parser):
                         help='Calculate spectrograms from .wav files')
     parser.add_argument('--extract-pitch', action='store_true',
                         help='Extract pitch')
+    parser.add_argument('--extract-mels-ds', action='store_true',
+                        help='Extract Downsampled mels')
     parser.add_argument('--save-alignment-priors', action='store_true',
                         help='Pre-calculate diagonal matrices of alignment of text to audio')
     parser.add_argument('--save-energy', action='store_true',
@@ -108,6 +110,9 @@ def main():
     if args.extract_pitch:
         Path(args.dataset_path, 'pitch').mkdir(parents=False, exist_ok=True)
 
+    if args.extract_mels_ds:
+        Path(args.dataset_path, 'mels_ds').mkdir(parents=False, exist_ok=True)
+
     if args.save_alignment_priors:
         Path(args.dataset_path, 'alignment_priors').mkdir(parents=False, exist_ok=True)
 
@@ -143,7 +148,9 @@ def main():
             pitch_norm=args.pitch_norm,
             pitch_norm_method=args.pitch_norm_method,
             two_pass_method=args.two_pass_method,
-            cwt_accent=False)
+            cwt_accent=False,
+            mels_downsampled=args.extract_mels_ds,
+            load_ds_mel_from_disk=False)
 
         data_loader = DataLoader(
             dataset,
@@ -158,7 +165,7 @@ def main():
         all_filenames = set()
         for i, batch in enumerate(tqdm.tqdm(data_loader)):
             tik = time.time()
-            text, input_lens, mels, mel_lens, _, pitch, energy, speaker, attn_prior, fpaths, cwt_acc = batch
+            text, input_lens, mels, mel_lens, _, pitch, energy, speaker, attn_prior, fpaths, cwt_acc, mels_ds = batch
             # Ensure filenames are unique
             for p in fpaths:
                 fname = Path(p).name
@@ -190,6 +197,11 @@ def main():
                     fpath = Path(args.dataset_path, 'energy', fname)
                     torch.save(e[:mel_lens[j]], fpath)
 
+            if args.extract_mels_ds:
+                for j, mel_ds in enumerate(mels_ds):
+                    fname = Path(fpaths[j]).with_suffix('.pt').name
+                    fpath = Path(args.dataset_path, 'mels_ds', fname)
+                    torch.save(mel_ds[:, :mel_lens[j]], fpath)
 
 if __name__ == '__main__':
     main()

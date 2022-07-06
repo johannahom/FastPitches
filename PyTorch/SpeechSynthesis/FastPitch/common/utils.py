@@ -21,6 +21,7 @@ import numpy as np
 import torch
 from scipy.io.wavfile import read
 from csv import DictReader
+import csv
 
 class BenchmarkStats:
     """ Tracks statistics used for benchmarking. """
@@ -71,10 +72,10 @@ def load_filepaths_and_text(fnames, dataset_path=None, has_speakers=False,
     #Reads in csv with headers mels|pitch|text|optional-speaker
     #Returns list of dicts
 
-    fpaths_and_text = []
+    #fpaths_and_text = []
     for fname in fnames:
         with open(fname, encoding='utf-8') as f:
-            dict_reader = DictReader(f, delimiter='|')
+            dict_reader = DictReader(f, delimiter='|', quoting=csv.QUOTE_NONE)
             fpaths_and_text = list(dict_reader)
     return fpaths_and_text
 

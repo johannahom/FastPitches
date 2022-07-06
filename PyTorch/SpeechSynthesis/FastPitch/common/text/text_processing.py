@@ -50,9 +50,9 @@ class TextProcessing(object):
         while len(text):
             m = _curly_re.match(text)
             if not m:
-                sequence += self.symbols_to_sequence(text)
+                sequence += self.symbols_to_sequence(text) #if the text is not in curly, convert graphemes to indices
                 break
-            sequence += self.symbols_to_sequence(m.group(1))
+            sequence += self.symbols_to_sequence(m.group(1)) 
             sequence += self.arpabet_to_sequence(m.group(2))
             text = m.group(3)
         return sequence
@@ -157,16 +157,17 @@ class TextProcessing(object):
                     for word in words]
                 text_arpabet = ''.join(text_arpabet)
                 text = text_arpabet
+                print(text)
                # text_encoded = self.text_to_sequence(text)
 
             elif self.handle_arpabet == 'word' and self.get_counts == True:
-                words = _words_re.findall(text)
-                text_arpabet = []
-                text_encoded = []
-                text_info = [] 
+                words = _words_re.findall(text) # finding the word in sequence -- word returns tuple ('', '.'), ('','word')
+                text_arpabet = [] #list for symbols
+                text_encoded = [] #list for encoded symbols
+                text_info = [] #text info list
                 for word in words:
-                    if word[0] == '':
-                        te = self.text_to_sequence(word[1])
+                    if word[0] == '': #if the first element in the tuple is empty
+                        te = self.text_to_sequence(word[1]) 
                         text_encoded += te
                         text_info.append((word[1], len(te)))
                         text_arpabet.append(word[1])
@@ -182,6 +183,7 @@ class TextProcessing(object):
                             te = self.text_to_sequence(word[0])
                             text_info.append((word[0], len(te)))
                             text_encoded += te
+                print(text_arapbet)
                 return text_encoded, text_info
 
             elif self.handle_arpabet != '':

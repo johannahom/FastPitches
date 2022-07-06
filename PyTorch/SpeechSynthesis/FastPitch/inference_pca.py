@@ -32,6 +32,8 @@ import sys
 import warnings
 from pathlib import Path
 from tqdm import tqdm
+import pickle
+from sklearn.decomposition import PCA
 
 import torch
 import numpy as np
@@ -137,6 +139,10 @@ def parse_args(parser):
                       help='Enable Prosodic Embedding Conditioning')
     cond.add_argument('--reference-extract', action='store_true',
                       help='Extract Prosodic Embedding from mels Conditioning')
+    cond.add_argument('--load-reference', action='store_true',
+                      help='Load Prosodic Embedding from mels Conditioning')
+    cond.add_argument('--pca-test', action='store_true',
+                      help='Synthesise various components from embedding space')
 #    cond.add_argument('--mels-downsampled', action='store_true',
 #                      help='Using downsampled mels for reference encoder')
     return parser
@@ -384,7 +390,7 @@ def main():
     batches = prepare_input_sequence(
         fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
         args.dataset_path, load_mels=(generator is None), p_arpabet=args.p_arpabet, load_cwt=args.cwt_accent,
-        load_reference=args.reference_encoder, reference_extract=args.reference_extract)
+        load_reference=args.load_reference, reference_extract=args.reference_extract)
 
     # Use real data rather than synthetic - FastPitch predicts len
     for _ in tqdm(range(args.warmup_steps), 'Warmup'):
@@ -396,7 +402,7 @@ def main():
                 audios = waveglow(mel, sigma=args.sigma_infer).float()
                 _ = denoiser(audios, strength=args.denoising_strength)
 
-    gen_measures = MeasureTime(cuda=args.cuda)
+#    gen_measures = MeasureTime(cuda=args.cuda)
     waveglow_measures = MeasureTime(cuda=args.cuda)
 
     gen_kw = {'pace': args.pace,
@@ -419,67 +425,73 @@ def main():
     log_enabled = reps == 1
     log = lambda s, d: DLLogger.log(step=s, data=d) if log_enabled else None
 
+
+    # in synthesis, something like
+    embedding_dim = 64
+    with open('embedding_pca.pkl', 'rb') as f:
+        embedding_pca = pickle.load(f)
+
     for rep in (tqdm(range(reps), 'Inference') if reps > 1 else range(reps)):
         for b in batches:
             if generator is None:
                 log(rep, {'Synthesizing from ground truth mels'})
                 mel, mel_lens = b['mel'], b['mel_lens']
             else:
-                with torch.no_grad(), gen_measures:
+                with torch.no_grad():
                     if args.cwt_accent == True:
                         mel, mel_lens, *_ = generator(b['text'], **gen_kw, word_level_conditioning=b['cwt_upsampled'])
-                    elif args.reference_encoder == True:
+                    elif args.reference_encoder and not args.pca_test:
                         mel, mel_lens, *_ = generator(b['text'], **gen_kw, reference=b['reference'], reference_lens=b['reference_lens'])
-                    else:
-                        mel, mel_lens, *_ = generator(b['text'], **gen_kw)
-                gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
-                all_letters += b['text_lens'].sum().item()
-                all_frames += mel.size(0) * mel.size(2)
-                log(rep, {"fastpitch_frames/s": gen_infer_perf})
-                log(rep, {"fastpitch_latency": gen_measures[-1]})
+                    elif args.reference_encoder and args.pca_test:
+                        for pc_i in range(0, 5):
+                            pc = np.zeros(embedding_dim)
+                            for val in [-3, -2, 1, 0, 1, 2, 3]:
+                                pc[pc_i] = val
+                                ref_embedding = embedding_pca.inverse_transform([pc])   
+                                #convert to input format 
+                                ref_embedding = torch.from_numpy(ref_embedding).float().to(device)
+                                print(ref_embedding.size)
+                                mel, mel_lens, *_ = generator(b['text'], **gen_kw, reference=ref_embedding)
 
-                if args.save_mels:
-                    for i, mel_ in enumerate(mel):
-                        m = mel_[:, :mel_lens[i].item()].permute(1, 0)
-                        fname = b['output'][i] if 'output' in b else f'mel_{i}.npy'
-                        mel_path = Path(args.output, Path(fname).stem + '.npy')
-                        np.save(mel_path, m.cpu().numpy())
+#                                gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
+#                                all_letters += b['text_lens'].sum().item()
+#                                all_frames += mel.size(0) * mel.size(2)
+#                                log(rep, {"fastpitch_frames/s": gen_infer_perf})
+#                                log(rep, {"fastpitch_latency": gen_measures[-1]})
 
-            if waveglow is not None:
-                with torch.no_grad(), waveglow_measures:
-                    audios = waveglow(mel, sigma=args.sigma_infer)
-                    audios = denoiser(audios.float(),
-                                      strength=args.denoising_strength
-                                      ).squeeze(1)
 
-                all_utterances += len(audios)
-                all_samples += sum(audio.size(0) for audio in audios)
-                waveglow_infer_perf = (
-                    audios.size(0) * audios.size(1) / waveglow_measures[-1])
+                                if waveglow is not None:
+                                    with torch.no_grad(), waveglow_measures:
+                                        audios = waveglow(mel, sigma=args.sigma_infer)
+                                        audios = denoiser(audios.float(),
+                                                          strength=args.denoising_strength
+                                                          ).squeeze(1)
 
-                log(rep, {"waveglow_samples/s": waveglow_infer_perf})
-                log(rep, {"waveglow_latency": waveglow_measures[-1]})
+                                    all_utterances += len(audios)
+                                    all_samples += sum(audio.size(0) for audio in audios)
+                                    waveglow_infer_perf = (
+                                        audios.size(0) * audios.size(1) / waveglow_measures[-1])
 
-                if args.output is not None and reps == 1:
-                    for i, audio in enumerate(audios):
-                        audio = audio[:mel_lens[i].item() * args.stft_hop_length]
+                                    log(rep, {"waveglow_samples/s": waveglow_infer_perf})
+                                    log(rep, {"waveglow_latency": waveglow_measures[-1]})
 
-                        if args.fade_out:
-                            fade_len = args.fade_out * args.stft_hop_length
-                            fade_w = torch.linspace(1.0, 0.0, fade_len)
-                            audio[-fade_len:] *= fade_w.to(audio.device)
+                                    if args.output is not None and reps == 1:
+                                        for i, audio in enumerate(audios):
+                                            audio = audio[:mel_lens[i].item() * args.stft_hop_length]
 
-                        audio = audio / torch.max(torch.abs(audio))
-                        fname = b['output'][i] if 'output' in b else f'audio_{i}.wav'
-                        audio_path = Path(args.output, fname)
-                        write(audio_path, args.sampling_rate, audio.cpu().numpy())
+                                            audio = audio / torch.max(torch.abs(audio))
+                                            if 'output' in b:
+                                                fname = b['output'][i]
+                                                fname = f'audio_{fname}_component{pc_i}_{val}.wav'
+                                            audio_path = Path(args.output, fname)
+                                            write(audio_path, args.sampling_rate, audio.cpu().numpy())
 
-            if generator is not None and waveglow is not None:
-                log(rep, {"latency": (gen_measures[-1] + waveglow_measures[-1])})
+#                                if generator is not None and waveglow is not None:
+#                                    log(rep, {"latency": (gen_measures[-1] + waveglow_measures[-1])})
 
     log_enabled = True
     if generator is not None:
-        gm = np.sort(np.asarray(gen_measures))
+ #       gm = np.sort(np.asarray(gen_measures))
         rtf = all_samples / (all_utterances * gm.mean() * args.sampling_rate)
         log((), {"avg_fastpitch_letters/s": all_letters / gm.sum()})
         log((), {"avg_fastpitch_frames/s": all_frames / gm.sum()})
