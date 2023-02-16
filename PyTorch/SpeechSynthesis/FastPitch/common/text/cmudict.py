@@ -39,7 +39,7 @@ class CMUDict:
   def initialize(self, file_or_path, keep_ambiguous=True):
     if isinstance(file_or_path, str):
       try:
-        with open(file_or_path, encoding='latin-1') as f:
+        with open(file_or_path, encoding='utf-8') as f:
           entries = _parse_cmudict(f)
       except FileNotFoundError:
         print("CMUdict missing. Download with")
@@ -64,7 +64,7 @@ class CMUDict:
     '''Returns list of ARPAbet pronunciations of the given word.'''
     if len(self._entries) == 0:
       raise ValueError("CMUDict not initialized")
-    return self._entries.get(word.upper())
+    return self._entries.get(word.lower())
 
 
 _alt_re = re.compile(r'\([0-9]+\)')
@@ -73,7 +73,7 @@ _alt_re = re.compile(r'\([0-9]+\)')
 def _parse_cmudict(file):
   cmudict = {}
   for line in file:
-    if len(line) and (line[0] >= 'A' and line[0] <= 'Z' or line[0] == "'"):
+    if len(line) and (line[0] >= 'a' and line[0] <= 'z' or line[0] == "'"):
       parts = line.split('  ')
       word = re.sub(_alt_re, '', parts[0])
       pronunciation = _get_pronunciation(parts[1])
