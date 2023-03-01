@@ -23,7 +23,7 @@ _arpa_re = re.compile(r'{[^}]+}|\S+')
 
 class TextProcessing(object):
     def __init__(self, symbol_set, cleaner_names, p_arpabet=0.0,
-                 handle_arpabet='word', handle_arpabet_ambiguous='ignore',
+                 handle_arpabet='word', handle_arpabet_ambiguous='random',
                  expand_currency=True):
         self.symbols = get_symbols(symbol_set)
         self.cleaner_names = cleaner_names

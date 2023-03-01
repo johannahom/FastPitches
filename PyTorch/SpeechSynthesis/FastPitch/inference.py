@@ -201,7 +201,7 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
                            batch_size=128, dataset=None, load_mels=False,
                            load_pitch=False, p_arpabet=0.0):
     tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
-
+    print(fields)
     fields['text'] = [torch.LongTensor(tp.encode_text(text))
                       for text in fields['text']]
     order = np.argsort([-t.size(0) for t in fields['text']])
@@ -363,7 +363,7 @@ def main():
               'condition': args.condition, #@Johannah have to add condition here
               'pitch_tgt': None,
               'pitch_transform': build_pitch_transformation(args)}
-
+    print(gen_kw)
     if args.torchscript:
         gen_kw.pop('pitch_transform')
         print('NOTE: Pitch transforms are disabled with TorchScript')

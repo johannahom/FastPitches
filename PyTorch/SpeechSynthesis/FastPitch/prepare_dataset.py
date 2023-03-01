@@ -114,7 +114,7 @@ def main():
             n_mel_channels=args.n_mel_channels,
             p_arpabet=0.0,
             n_speakers=args.n_speakers,
-            n_conditions=args.n_conditions
+            n_conditions=args.n_conditions,
             load_mel_from_disk=False,
             load_pitch_from_disk=False,
             pitch_mean=None,
@@ -144,7 +144,7 @@ def main():
         for i, batch in enumerate(tqdm.tqdm(data_loader)):
             tik = time.time()
 
-            _, input_lens, mels, mel_lens, _, pitch, _, _, attn_prior, fpaths = batch
+            _, input_lens, mels, mel_lens, _, pitch, _, _, attn_prior, fpaths, _ = batch
 
             # Ensure filenames are unique
             for p in fpaths:

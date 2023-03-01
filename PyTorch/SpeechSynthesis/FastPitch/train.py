@@ -340,7 +340,9 @@ def plot_batch_mels(pred_tgt_lists, rank):
     # prediction: mel, pitch, energy
     # target: mel, pitch, energy
     for mel_pitch_energy in pred_tgt_lists:
+        #print(mel_pitch_energy)
         mels = mel_pitch_energy[0]
+        #print(mels.size())
         if mels.size(dim=2) == 80:  # tgt and pred mel have diff dimension order
             mels = mels.permute(0, 2, 1)
         mel_lens = mel_pitch_energy[-1]
@@ -371,7 +373,7 @@ def plot_batch_mels(pred_tgt_lists, rank):
 def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
-                'speaker', 'attn_prior', 'audiopaths']
+                'speaker', 'attn_prior', 'audiopaths', 'condition']
     y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
