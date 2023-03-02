@@ -160,7 +160,9 @@ def parse_args(parser):
     cond.add_argument('--pitch-std', type=float, default=65.72038,
                       help='Normalization value for pitch')
     cond.add_argument('--load-mel-from-disk', action='store_true',
-                      help='Use mel-spectrograms cache on the disk')  # XXX
+                      help='Use mel-spectrograms cache on the disk')
+    cond.add_argument('--norm-pitch-by-speaker', action='store_true',
+                      help='Pitch normalisation per speaker, values read from input data')
 
     audio = parser.add_argument_group('audio parameters')
     audio.add_argument('--max-wav-value', default=32768.0, type=float,

@@ -141,6 +141,7 @@ class TTSDataset(torch.utils.data.Dataset):
                  load_pitch_from_disk=True,
                  pitch_mean=214.72203,  # LJSpeech defaults
                  pitch_std=65.72038,
+                 norm_pitch_by_speaker=False,
                  max_wav_value=None,
                  sampling_rate=None,
                  filter_length=None,
@@ -184,6 +185,7 @@ class TTSDataset(torch.utils.data.Dataset):
         self.tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
         self.n_speakers = n_speakers
         self.n_conditions = n_conditions
+        self.norm_pitch_by_speaker = norm_pitch_by_speaker
         self.pitch_tmp_dir = pitch_online_dir
         self.f0_method = pitch_online_method
         self.betabinomial_tmp_dir = betabinomial_online_dir
@@ -204,6 +206,7 @@ class TTSDataset(torch.utils.data.Dataset):
             print('WARNING: Audiopaths file has more columns than expected')
 
         to_tensor = lambda x: torch.Tensor([x]) if type(x) is float else x
+
         self.pitch_mean = to_tensor(pitch_mean)
         self.pitch_std = to_tensor(pitch_std)
 
@@ -217,6 +220,13 @@ class TTSDataset(torch.utils.data.Dataset):
             speaker = int(self.audiopaths_and_text[index]['speaker'])
         if self.n_conditions > 1:
             condition = int(self.audiopaths_and_text[index]['condition'])
+
+        if norm_pitch_by_speaker:
+            pitch_mean = to_tensor(float(self.audiopaths_and_text[index]['pitch_mean']))
+            pitch_std = to_tensor(float(self.audiopaths_and_text[index]['pitch_std']))
+        else:
+            pitch_mean = self.pitch_mean
+            pitch_std = self.pitch_std
 
         mel = self.get_mel(audiopath)
         text = self.get_text(text)
@@ -291,7 +301,7 @@ class TTSDataset(torch.utils.data.Dataset):
 
         return attn_prior
 
-    def get_pitch(self, index, mel_len=None):
+    def get_pitch(self, index, mel_len=None, pitch_mean, pitch_std):
         audiopath = self.audiopaths_and_text[index]['mels']
 
         # why do we need the speaker here?
@@ -302,9 +312,9 @@ class TTSDataset(torch.utils.data.Dataset):
         if self.load_pitch_from_disk:
             pitchpath = self.audiopaths_and_text[index]['pitch']
             pitch = torch.load(pitchpath)
-            if self.pitch_mean is not None:
-                assert self.pitch_std is not None
-                pitch = normalize_pitch(pitch, self.pitch_mean, self.pitch_std)
+            if pitch_mean is not None:
+                assert pitch_std is not None
+                pitch = normalize_pitch(pitch, pitch_mean, pitch_std)
             return pitch
 
         if self.pitch_tmp_dir is not None:
