@@ -23,7 +23,7 @@ _arpa_re = re.compile(r'{[^}]+}|\S+')
 
 class TextProcessing(object):
     def __init__(self, symbol_set, cleaner_names, p_arpabet=0.0,
-                 handle_arpabet='word', handle_arpabet_ambiguous='random',
+                 handle_arpabet='sentence', handle_arpabet_ambiguous='random',
                  expand_currency=True):
         self.symbols = get_symbols(symbol_set)
         self.cleaner_names = cleaner_names
@@ -155,7 +155,7 @@ class TextProcessing(object):
             elif self.handle_arpabet != '':
                 raise Exception("{} handle_arpabet is not supported".format(
                     self.handle_arpabet))
-
+        
         text_encoded = self.text_to_sequence(text)
 
         if return_all:

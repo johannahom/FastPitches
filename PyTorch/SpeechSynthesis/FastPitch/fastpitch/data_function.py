@@ -29,7 +29,7 @@ import functools
 import json
 import re
 from pathlib import Path
-
+import tgt
 import librosa
 import numpy as np
 import torch
@@ -122,6 +122,53 @@ def normalize_pitch(pitch, mean, std):
     return pitch
 
 
+def parse_textgrid(tier, sampling_rate, hop_length):
+
+    sil_phones = ["sil", "sp", "spn", ""]
+    start_time = tier[0].start_time
+    end_time = tier[-1].end_time
+    phones = []
+    durations = []
+    for i, t in enumerate(tier._objects):
+        s, e, p = t.start_time, t.end_time, t.text
+        if p not in sil_phones:
+            phones.append(p)
+        else:
+            if (i == 0) or (i == len(tier) - 1):
+                # leading or trailing silence
+                phones.append("sil")
+            else:
+                # short pause between words
+                phones.append("sp")
+        durations.append(int(np.ceil(e * sampling_rate / hop_length)
+                             - np.ceil(s * sampling_rate / hop_length)))
+    n_samples = end_time * sampling_rate
+    n_frames = n_samples / hop_length
+    # fix occasional length mismatches at the end of utterances when
+    # duration in samples is an integer multiple of hop_length
+    if n_frames.is_integer():
+        durations[-1] += 1
+
+    return phones, durations, start_time, end_time
+
+
+def extract_durs_from_textgrid(fname, sampling_rate, hop_length, mel_len):
+
+    tg_path = fname
+    try:
+        textgrid = tgt.io.read_textgrid(tg_path, include_empty_intervals=True)
+    except FileNotFoundError:
+        print('Expected consistent filepaths between wavs and TextGrids, e.g.')
+        print('  /path/to/wavs/speaker_uttID.wav -> /path/to/TextGrid/speaker_uttID.TextGrid')
+        raise
+
+    phones, durs, start, end = parse_textgrid(
+        textgrid.get_tier_by_name('phones'), sampling_rate, hop_length)
+    assert sum(durs) == mel_len, f'Length mismatch: {fname}, {sum(durs)} != {mel_len}'
+
+    return torch.LongTensor(durs)
+
+
 class TTSDataset(torch.utils.data.Dataset):
     """
         1) loads audio,text pairs
@@ -133,12 +180,14 @@ class TTSDataset(torch.utils.data.Dataset):
                  audiopaths_and_text,
                  text_cleaners,
                  n_mel_channels,
+                 input_type='text',
                  symbol_set='english_basic',
                  p_arpabet=1.0,
                  n_speakers=1,
                  n_conditions=1,
                  load_mel_from_disk=True,
                  load_pitch_from_disk=True,
+                 load_duration_from_disk=False,
                  pitch_mean=214.72203,  # LJSpeech defaults
                  pitch_std=65.72038,
                  norm_pitch_by_speaker=False,
@@ -155,6 +204,7 @@ class TTSDataset(torch.utils.data.Dataset):
                  betabinomial_online_dir=None,
                  use_betabinomial_interpolator=True,
                  pitch_online_method='pyin',
+                 duration_extraction_method='attn_prior',
                  **ignored):
 
         # Expect a list of filenames
@@ -166,6 +216,7 @@ class TTSDataset(torch.utils.data.Dataset):
         self.audiopaths_and_text = load_filepaths_and_text(
             audiopaths_and_text, dataset_path,
             has_speakers=(n_speakers > 1), has_conditions=(n_conditions > 1))
+
         self.load_mel_from_disk = load_mel_from_disk
         if not load_mel_from_disk:
             self.max_wav_value = max_wav_value
@@ -173,7 +224,9 @@ class TTSDataset(torch.utils.data.Dataset):
             self.stft = layers.TacotronSTFT(
                 filter_length, hop_length, win_length,
                 n_mel_channels, sampling_rate, mel_fmin, mel_fmax)
+
         self.load_pitch_from_disk = load_pitch_from_disk
+        self.load_duration_from_disk = load_duration_from_disk
 
         self.prepend_space_to_text = prepend_space_to_text
         self.append_space_to_text = append_space_to_text
@@ -182,6 +235,7 @@ class TTSDataset(torch.utils.data.Dataset):
             'Only 0.0 and 1.0 p_arpabet is currently supported. '
             'Variable probability breaks caching of betabinomial matrices.')
 
+        self.input_type = input_type
         self.tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
         self.n_speakers = n_speakers
         self.n_conditions = n_conditions
@@ -190,7 +244,9 @@ class TTSDataset(torch.utils.data.Dataset):
         self.f0_method = pitch_online_method
         self.betabinomial_tmp_dir = betabinomial_online_dir
         self.use_betabinomial_interpolator = use_betabinomial_interpolator
-
+        self.duration_extraction_method = duration_extraction_method
+        self.hop_length = hop_length
+       
         if use_betabinomial_interpolator:
             self.betabinomial_interpolator = BetaBinomialInterpolator()
 
@@ -221,7 +277,8 @@ class TTSDataset(torch.utils.data.Dataset):
         if self.n_conditions > 1:
             condition = int(self.audiopaths_and_text[index]['condition'])
 
-        if norm_pitch_by_speaker:
+        to_tensor = lambda x: torch.Tensor([x]) if type(x) is float else x
+        if self.norm_pitch_by_speaker:
             pitch_mean = to_tensor(float(self.audiopaths_and_text[index]['pitch_mean']))
             pitch_std = to_tensor(float(self.audiopaths_and_text[index]['pitch_std']))
         else:
@@ -229,10 +286,23 @@ class TTSDataset(torch.utils.data.Dataset):
             pitch_std = self.pitch_std
 
         mel = self.get_mel(audiopath)
-        text = self.get_text(text)
-        pitch = self.get_pitch(index, mel.size(-1))
+   
+        #if input is transcription, skip preprocessing and encode input directly
+        if self.input_type == 'transcription':
+            text = self.get_text(self.audiopaths_and_text[index]['transcription'], encode_transcription=True)
+        else:
+            text = self.get_text(text)
+
+        pitch = self.get_pitch(index, mel.size(-1), pitch_mean, pitch_std)
         energy = torch.norm(mel.float(), dim=0, p=2)
-        attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
+
+        #duration extraction
+        if self.duration_extraction_method == 'attn_prior':
+            attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
+            duration = None
+        elif self.duration_extraction_method == 'textgrid':
+            duration = self.get_durations_textgrid(index, mel.shape[1]) 
+            attn_prior = None
 
         assert pitch.size(-1) == mel.size(-1)
 
@@ -241,7 +311,7 @@ class TTSDataset(torch.utils.data.Dataset):
             pitch = pitch[None, :]
 
         return (text, mel, len(text), pitch, energy, speaker, attn_prior,
-                audiopath, condition)
+                audiopath, condition, duration)
 
     def __len__(self):
         return len(self.audiopaths_and_text)
@@ -266,15 +336,18 @@ class TTSDataset(torch.utils.data.Dataset):
 
         return melspec
 
-    def get_text(self, text):
-        text = self.tp.encode_text(text)
-        space = [self.tp.encode_text("A A")[1]]
+    def get_text(self, text, encode_transcription=False):
+        if encode_transcription:
+            text = self.tp.text_to_sequence(text)
+        else:
+            text = self.tp.encode_text(text)
+            space = [self.tp.encode_text("A A")[1]]
 
-        if self.prepend_space_to_text:
-            text = space + text
+            if self.prepend_space_to_text:
+                text = space + text
 
-        if self.append_space_to_text:
-            text = text + space
+            if self.append_space_to_text:
+                text = text + space
 
         return torch.LongTensor(text)
 
@@ -301,7 +374,18 @@ class TTSDataset(torch.utils.data.Dataset):
 
         return attn_prior
 
-    def get_pitch(self, index, mel_len=None, pitch_mean, pitch_std):
+    def get_durations_textgrid(self, index, mel_len):
+        #TODO maybe change naming of attn_prior to something else later as it is not attn_prior
+        if self.load_duration_from_disk:
+            durpath = self.audiopaths_and_text[index]['durations']
+            durations = torch.load(durpath)
+        else:
+            durpath = self.audiopaths_and_text[index]['textgrid']
+            durations = extract_durs_from_textgrid(durpath, self.sampling_rate, self.hop_length, mel_len)
+
+        return durations
+
+    def get_pitch(self, index, mel_len=None, pitch_mean=None, pitch_std=None):
         audiopath = self.audiopaths_and_text[index]['mels']
 
         # why do we need the speaker here?
@@ -387,13 +471,16 @@ class TTSCollate:
                 speaker[i] = batch[ids_sorted_decreasing[i]][5]
         else:
             speaker = None
-
-        attn_prior_padded = torch.zeros(len(batch), max_target_len,
-                                        max_input_len)
-        attn_prior_padded.zero_()
-        for i in range(len(ids_sorted_decreasing)):
-            prior = batch[ids_sorted_decreasing[i]][6]
-            attn_prior_padded[i, :prior.size(0), :prior.size(1)] = prior
+      
+        if batch[0][6] is not None:
+            attn_prior_padded = torch.zeros(len(batch), max_target_len,
+                                            max_input_len)
+            attn_prior_padded.zero_()
+            for i in range(len(ids_sorted_decreasing)):
+                prior = batch[ids_sorted_decreasing[i]][6]
+                attn_prior_padded[i, :prior.size(0), :prior.size(1)] = prior
+        else:
+            attn_prior_padded = None
 
         # Count number of items - characters in text
         len_x = [x[2] for x in batch]
@@ -408,14 +495,23 @@ class TTSCollate:
         else:
             condition = None
 
+        if batch[0][9] is not None:
+            duration_padded = torch.LongTensor(len(batch), max_input_len)
+            duration_padded.zero_()
+            for i in range(len(ids_sorted_decreasing)):
+                duration = batch[ids_sorted_decreasing[i]][9]
+                duration_padded[i, :duration.size(1)] = duration #changed from 1 for Candor preprocess and LJ preprocess
+        else:
+            duration_padded = None
+
         return (text_padded, input_lengths, mel_padded, output_lengths, len_x,
                 pitch_padded, energy_padded, speaker, attn_prior_padded,
-                audiopaths, condition)
+                audiopaths, condition, duration_padded)
 
 
 def batch_to_gpu(batch):
     (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-     pitch_padded, energy_padded, speaker, attn_prior, audiopaths, condition) = batch
+     pitch_padded, energy_padded, speaker, attn_prior, audiopaths, condition, duration_padded) = batch
 
     text_padded = to_gpu(text_padded).long()
     input_lengths = to_gpu(input_lengths).long()
@@ -423,15 +519,19 @@ def batch_to_gpu(batch):
     output_lengths = to_gpu(output_lengths).long()
     pitch_padded = to_gpu(pitch_padded).float()
     energy_padded = to_gpu(energy_padded).float()
-    attn_prior = to_gpu(attn_prior).float()
+    if attn_prior is not None:
+        attn_prior = to_gpu(attn_prior).float()
     if speaker is not None:
         speaker = to_gpu(speaker).long()
     if condition is not None:
         condition = to_gpu(condition).long()
+    if duration_padded is not None:
+        duration_padded = to_gpu(duration_padded).long()
 
     # Alignments act as both inputs and targets - pass shallow copies
     x = [text_padded, input_lengths, mel_padded, output_lengths,
-         pitch_padded, energy_padded, speaker, attn_prior, audiopaths, condition]
-    y = [mel_padded, input_lengths, output_lengths]
+         pitch_padded, energy_padded, speaker, attn_prior, audiopaths, condition, duration_padded]
+     
+    y = [mel_padded, input_lengths, output_lengths, duration_padded]
     len_x = torch.sum(output_lengths)
     return (x, y, len_x)

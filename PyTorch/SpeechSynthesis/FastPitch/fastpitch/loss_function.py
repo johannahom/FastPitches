@@ -49,10 +49,16 @@ class FastPitchLoss(nn.Module):
          energy_pred, energy_tgt, attn_soft, attn_hard, attn_dur,
          attn_logprob) = model_out
 
-        (mel_tgt, in_lens, out_lens) = targets
+        (mel_tgt, in_lens, out_lens, dur_tgt) = targets
 
-        dur_tgt = attn_dur
+        if dur_tgt is None:
+            dur_tgt = attn_dur
+        else:
+            log_dur_pred = log_dur_pred.squeeze()
+            dur_pred = dur_pred.squeeze()
+ 
         dur_lens = in_lens
+#        print(dur_lens.shape)
 
         mel_tgt.requires_grad = False
         # (B,H,T) => (B,T,H)
@@ -84,23 +90,40 @@ class FastPitchLoss(nn.Module):
             energy_loss = 0
 
         # Attention loss
-        attn_loss = self.attn_ctc_loss(attn_logprob, in_lens, out_lens)
+        if attn_logprob is not None:
+            attn_loss = self.attn_ctc_loss(attn_logprob, in_lens, out_lens)
 
-        loss = (mel_loss
-                + dur_pred_loss * self.dur_predictor_loss_scale
-                + pitch_loss * self.pitch_predictor_loss_scale
-                + energy_loss * self.energy_predictor_loss_scale
-                + attn_loss * self.attn_loss_scale)
+            loss = (mel_loss
+                    + dur_pred_loss * self.dur_predictor_loss_scale
+                    + pitch_loss * self.pitch_predictor_loss_scale
+                    + energy_loss * self.energy_predictor_loss_scale
+                    + attn_loss * self.attn_loss_scale)
 
-        meta = {
-            'loss': loss.clone().detach(),
-            'mel_loss': mel_loss.clone().detach(),
-            'duration_predictor_loss': dur_pred_loss.clone().detach(),
-            'pitch_loss': pitch_loss.clone().detach(),
-            'attn_loss': attn_loss.clone().detach(),
-            'dur_error': (torch.abs(dur_pred - dur_tgt).sum()
-                          / dur_mask.sum()).detach(),
-        }
+            meta = {
+                'loss': loss.clone().detach(),
+                'mel_loss': mel_loss.clone().detach(),
+                'duration_predictor_loss': dur_pred_loss.clone().detach(),
+                'pitch_loss': pitch_loss.clone().detach(),
+                'attn_loss': attn_loss.clone().detach(),
+                'dur_error': (torch.abs(dur_pred - dur_tgt).sum()
+                              / dur_mask.sum()).detach(),
+            }
+
+        else:
+            loss = (mel_loss
+                    + dur_pred_loss * self.dur_predictor_loss_scale
+                    + pitch_loss * self.pitch_predictor_loss_scale
+                    + energy_loss * self.energy_predictor_loss_scale)
+                  
+            meta = {
+                'loss': loss.clone().detach(),
+                'mel_loss': mel_loss.clone().detach(),
+                'duration_predictor_loss': dur_pred_loss.clone().detach(),
+                'pitch_loss': pitch_loss.clone().detach(),
+                'dur_error': (torch.abs(dur_pred - dur_tgt).sum()
+                              / dur_mask.sum()).detach(),
+            }
+
 
         if energy_pred is not None:
             meta['energy_loss'] = energy_loss.clone().detach()

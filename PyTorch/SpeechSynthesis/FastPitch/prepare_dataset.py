@@ -28,13 +28,11 @@
 import argparse
 import time
 from pathlib import Path
-
 import torch
 import tqdm
 import dllogger as DLLogger
 from dllogger import StdOutBackend, JSONStreamBackend, Verbosity
 from torch.utils.data import DataLoader
-
 from fastpitch.data_function import TTSCollate, TTSDataset
 
 
@@ -50,8 +48,8 @@ def parse_args(parser):
                         help='Calculate spectrograms from .wav files')
     parser.add_argument('--extract-pitch', action='store_true',
                         help='Extract pitch')
-    parser.add_argument('--save-alignment-priors', action='store_true',
-                        help='Pre-calculate diagonal matrices of alignment of text to audio')
+    parser.add_argument('--extract-duration', action='store_true',
+                        help='Extract duration')
     parser.add_argument('--log-file', type=str, default='preproc_log.json',
                          help='Filename for logging')
     parser.add_argument('--n-speakers', type=int, default=1)
@@ -75,6 +73,12 @@ def parse_args(parser):
     # Pitch extraction
     parser.add_argument('--f0-method', default='pyin', type=str,
                         choices=['pyin'], help='F0 estimation method')
+    # Duration extraction
+    parser.add_argument('--duration-extraction-method', default='attn_prior', type=str,
+                        choices=['attn_prior', 'textgrid'], help='Duration extraction method')
+    # Text input type
+    parser.add_argument('--input-type', default='text', type=str,
+                        choices=['transcription', 'text'], help='Input Type')
     # Performance
     parser.add_argument('-b', '--batch-size', default=1, type=int)
     parser.add_argument('--n-workers', type=int, default=16)
@@ -100,8 +104,9 @@ def main():
     if args.extract_pitch:
         Path(args.dataset_path, 'pitch').mkdir(parents=False, exist_ok=True)
 
-    if args.save_alignment_priors:
-        Path(args.dataset_path, 'alignment_priors').mkdir(parents=False, exist_ok=True)
+    #Save durations
+    if args.extract_duration:
+        Path(args.dataset_path, 'duration').mkdir(parents=False, exist_ok=True)
 
     for filelist in args.wav_text_filelists:
 
@@ -112,6 +117,7 @@ def main():
             filelist,
             text_cleaners=['english_cleaners_v2'],
             n_mel_channels=args.n_mel_channels,
+            input_type=args.input_type,
             p_arpabet=0.0,
             n_speakers=args.n_speakers,
             n_conditions=args.n_conditions,
@@ -119,6 +125,7 @@ def main():
             load_pitch_from_disk=False,
             pitch_mean=None,
             pitch_std=None,
+            norm_pitch_by_speaker=False,
             max_wav_value=args.max_wav_value,
             sampling_rate=args.sampling_rate,
             filter_length=args.filter_length,
@@ -128,7 +135,8 @@ def main():
             mel_fmax=args.mel_fmax,
             betabinomial_online_dir=None,
             pitch_online_dir=None,
-            pitch_online_method=args.f0_method)
+            pitch_online_method=args.f0_method,
+            duration_extraction_method=args.duration_extraction_method)
 
         data_loader = DataLoader(
             dataset,
@@ -144,7 +152,7 @@ def main():
         for i, batch in enumerate(tqdm.tqdm(data_loader)):
             tik = time.time()
 
-            _, input_lens, mels, mel_lens, _, pitch, _, _, attn_prior, fpaths, _ = batch
+            _, input_lens, mels, mel_lens, _, pitch, _, _, attn_prior, fpaths, _, duration = batch
 
             # Ensure filenames are unique
             for p in fpaths:
@@ -165,11 +173,18 @@ def main():
                     fpath = Path(args.dataset_path, 'pitch', fname)
                     torch.save(p[:mel_lens[j]], fpath)
 
-            if args.save_alignment_priors:
-                for j, prior in enumerate(attn_prior):
-                    fname = Path(fpaths[j]).with_suffix('.pt').name
-                    fpath = Path(args.dataset_path, 'alignment_priors', fname)
-                    torch.save(prior[:mel_lens[j], :input_lens[j]], fpath)
+            if args.extract_duration:
+                if args.duration_extraction_method == 'attn_prior':
+                    for j, prior in enumerate(attn_prior):
+                        fname = Path(fpaths[j]).with_suffix('.pt').name
+                        fpath = Path(args.dataset_path, 'duration', fname)
+                        torch.save(prior[:mel_lens[j], :input_lens[j]], fpath)
+                elif args.duration_extraction_method == 'textgrid':
+                    for j, dur in enumerate(duration):
+                        fname = Path(fpaths[j]).with_suffix('.pt').name
+                        fpath = Path(args.dataset_path, 'duration', fname)
+                        torch.save(torch.LongTensor(duration), fpath)
+                #        torch.save(dur[:mel_lens[j], :dur[j]], fpath)
 
 
 if __name__ == '__main__':

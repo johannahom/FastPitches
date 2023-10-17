@@ -114,6 +114,7 @@ def get_model_config(model_name, args):
             p_out_fft_dropatt=args.p_out_fft_dropatt,
             p_out_fft_dropemb=args.p_out_fft_dropemb,
             # duration predictor
+            duration_extraction_method=args.duration_extraction_method,
             dur_predictor_kernel_size=args.dur_predictor_kernel_size,
             dur_predictor_filter_size=args.dur_predictor_filter_size,
             p_dur_predictor_dropout=args.p_dur_predictor_dropout,

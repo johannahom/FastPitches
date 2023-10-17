@@ -131,6 +131,9 @@ def parse_args(parser):
                       help='Number of speakers in the model.')
     cond.add_argument('--n-conditions', type=int, default=1,
                       help='Number of discrete conditions in the model.')
+    cond.add_argument('--duration-extraction-method', default='attn_prior',
+                      choices=['attn_prior', 'textgrid'],
+                      help='Choose method for extracting and modelling duration')
     return parser
 
 

@@ -124,6 +124,9 @@ def parse_args(parser):
                       help='Paths to training filelists.')
     data.add_argument('--validation-files', type=str, nargs='*',
                       required=True, help='Paths to validation filelists')
+    data.add_argument('--input-type', default='text',
+                      choices=['text', 'transcription'],
+                      help='Specifiy text or phones as input')
     data.add_argument('--text-cleaners', nargs='*',
                       default=['english_cleaners'], type=str,
                       help='Type of text cleaners for input text')
@@ -152,7 +155,7 @@ def parse_args(parser):
                       help='Use pitch cached on disk with prepare_dataset.py')
     cond.add_argument('--pitch-online-method', default='pyin',
                       choices=['pyin'],
-                      help='Calculate pitch on the fly during trainig')
+                      help='Calculate pitch on the fly during training')
     cond.add_argument('--pitch-online-dir', type=str, default=None,
                       help='A directory for storing pitch calculated on-line')
     cond.add_argument('--pitch-mean', type=float, default=214.72203,
@@ -163,6 +166,11 @@ def parse_args(parser):
                       help='Use mel-spectrograms cache on the disk')
     cond.add_argument('--norm-pitch-by-speaker', action='store_true',
                       help='Pitch normalisation per speaker, values read from input data')
+    cond.add_argument('--duration-extraction-method', default='attn_prior',
+                      choices=['attn_prior', 'textgrid'],
+                      help='Choose method for extracting and modelling duration')
+    cond.add_argument('--load-duration-from-disk', action='store_true',
+                      help='Use durations cache on the disk')
 
     audio = parser.add_argument_group('audio parameters')
     audio.add_argument('--max-wav-value', default=32768.0, type=float,
@@ -375,7 +383,7 @@ def plot_batch_mels(pred_tgt_lists, rank):
 def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
-                'speaker', 'attn_prior', 'audiopaths', 'condition']
+                'speaker', 'attn_prior', 'audiopaths', 'condition', 'duration_padded']
     y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
@@ -387,8 +395,18 @@ def log_validation_batch(x, y_pred, rank):
     validation_dict.pop('dec_mask', None)
     log(validation_dict, rank)  # something in here returns a warning
 
-    pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
-    tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
+
+    if validation_dict['attn_hard_dur'] is not None:
+        pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'attn_hard_dur']
+        tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'attn_hard_dur']
+
+    else:
+        pred_specs_keys = ['mel_out', 'pitch_pred', 'energy_pred', 'duration_padded']
+        tgt_specs_keys = ['mel_padded', 'pitch_tgt', 'energy_tgt', 'duration_padded']
+        validation_dict['duration_padded'] = validation_dict['duration_padded'].squeeze()
+        #print(validation_dict['duration_padded'])
+        validation_dict['dur_pred'] = validation_dict['dur_pred'].squeeze()
+
     plot_batch_mels([[validation_dict[key] for key in pred_specs_keys],
                      [validation_dict[key] for key in tgt_specs_keys]], rank)
 
@@ -663,22 +681,23 @@ def main():
                 y_pred = model(x)
                 loss, meta = criterion(y_pred, y)
 
-                if (args.kl_loss_start_epoch is not None
-                        and epoch >= args.kl_loss_start_epoch):
+                if args.duration_extraction_method == 'attn_prior':
+                    if (args.kl_loss_start_epoch is not None
+                            and epoch >= args.kl_loss_start_epoch):
 
-                    if args.kl_loss_start_epoch == epoch and epoch_iter == 1:
-                        print('Begin hard_attn loss')
+                        if args.kl_loss_start_epoch == epoch and epoch_iter == 1:
+                            print('Begin hard_attn loss')
 
-                    _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
-                    binarization_loss = attention_kl_loss(attn_hard, attn_soft)
-                    kl_weight = min((epoch - args.kl_loss_start_epoch) / args.kl_loss_warmup_epochs, 1.0) * args.kl_loss_weight
-                    meta['kl_loss'] = binarization_loss.clone().detach() * kl_weight
-                    loss += kl_weight * binarization_loss
+                        _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
+                        binarization_loss = attention_kl_loss(attn_hard, attn_soft)
+                        kl_weight = min((epoch - args.kl_loss_start_epoch) / args.kl_loss_warmup_epochs, 1.0) * args.kl_loss_weight
+                        meta['kl_loss'] = binarization_loss.clone().detach() * kl_weight
+                        loss += kl_weight * binarization_loss
 
-                else:
-                    meta['kl_loss'] = torch.zeros_like(loss)
-                    kl_weight = 0
-                    binarization_loss = 0
+                    else:
+                        meta['kl_loss'] = torch.zeros_like(loss)
+                        kl_weight = 0
+                        binarization_loss = 0
 
                 loss /= args.grad_accumulation
 
@@ -722,7 +741,6 @@ def main():
                     apply_multi_tensor_ema(args.ema_decay, *mt_ema_params)
 
                 iter_mel_loss = iter_meta['mel_loss'].item()
-                iter_kl_loss = iter_meta['kl_loss'].item()
                 iter_pitch_loss = iter_meta['pitch_loss'].item()
                 iter_energy_loss = iter_meta['energy_loss'].item()
                 iter_dur_loss = iter_meta['duration_predictor_loss'].item()
@@ -734,7 +752,8 @@ def main():
                 epoch_pitch_loss += iter_pitch_loss
                 epoch_energy_loss += iter_energy_loss
                 epoch_dur_loss += iter_dur_loss
-
+                if args.duration_extraction_method == 'attn_prior':
+                    iter_kl_loss = iter_meta['kl_loss'].item()
                 if epoch_iter % 5 == 0:
                     log({
                         'epoch': epoch,
@@ -743,8 +762,8 @@ def main():
                         'total_steps': total_iter,
                         'loss/loss': iter_loss,
                         'mel-loss/mel_loss': iter_mel_loss,
-                        'kl_loss': iter_kl_loss,
-                        'kl_weight': kl_weight,
+                        #'kl_loss': iter_kl_loss,
+                        #'kl_weight': kl_weight,
                         'pitch-loss/pitch_loss': iter_pitch_loss,
                         'energy-loss/energy_loss': iter_energy_loss,
                         'dur-loss/dur_loss': iter_dur_loss,

@@ -126,7 +126,9 @@ class FastPitch(nn.Module):
                  energy_predictor_kernel_size, energy_predictor_filter_size,
                  p_energy_predictor_dropout, energy_predictor_n_layers,
                  energy_embedding_kernel_size,
-                 n_speakers, speaker_emb_weight, n_conditions, condition_emb_weight, pitch_conditioning_formants=1):
+                 n_speakers, speaker_emb_weight, n_conditions,
+                 condition_emb_weight, duration_extraction_method,
+                 pitch_conditioning_formants=1):
         super(FastPitch, self).__init__()
 
         self.encoder = FFTransformer(
@@ -156,7 +158,8 @@ class FastPitch(nn.Module):
             self.condition_emb = None
         self.condition_emb_weight = condition_emb_weight
 
-
+        self.duration_extraction_method=duration_extraction_method
+ 
         self.duration_predictor = TemporalPredictor(
             in_fft_output_size,
             filter_size=dur_predictor_filter_size,
@@ -250,7 +253,7 @@ class FastPitch(nn.Module):
     def forward(self, inputs, use_gt_pitch=True, pace=1.0, max_duration=75):
 
         (inputs, input_lens, mel_tgt, mel_lens, pitch_dense, energy_dense,
-         speaker, attn_prior, audiopaths, condition) = inputs
+         speaker, attn_prior, audiopaths, condition, duration) = inputs
 
         mel_max_len = mel_tgt.size(2)
 
@@ -270,33 +273,48 @@ class FastPitch(nn.Module):
 
         # Input FFT
         enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, conditioning_2=cond_emb) #need to add condition conditioning here
+        
+        #----------- Duration Prediction -------------
 
-        # Alignment
-        text_emb = self.encoder.word_emb(inputs)
+        if self.duration_extraction_method == 'attn_prior':
+            # Alignment
+            text_emb = self.encoder.word_emb(inputs)
 
-        # make sure to do the alignments before folding
-        attn_mask = mask_from_lens(input_lens)[..., None] == 0
-        # attn_mask should be 1 for unused timesteps in the text_enc_w_spkvec tensor
+            # make sure to do the alignments before folding
+            attn_mask = mask_from_lens(input_lens)[..., None] == 0
+            # attn_mask should be 1 for unused timesteps in the text_enc_w_spkvec tensor
 
-        attn_soft, attn_logprob = self.attention(
-            mel_tgt, text_emb.permute(0, 2, 1), mel_lens, attn_mask,
-            key_lens=input_lens, keys_encoded=enc_out, attn_prior=attn_prior)
+            attn_soft, attn_logprob = self.attention(
+                mel_tgt, text_emb.permute(0, 2, 1), mel_lens, attn_mask,
+                key_lens=input_lens, keys_encoded=enc_out, attn_prior=attn_prior)
 
-        attn_hard = self.binarize_attention_parallel(
-            attn_soft, input_lens, mel_lens)
+            attn_hard = self.binarize_attention_parallel(
+                attn_soft, input_lens, mel_lens)
 
-        # Viterbi --> durations
-        attn_hard_dur = attn_hard.sum(2)[:, 0, :]
-        dur_tgt = attn_hard_dur
+            # Viterbi --> durations
+            attn_hard_dur = attn_hard.sum(2)[:, 0, :]
+            dur_tgt = attn_hard_dur
 
-        assert torch.all(torch.eq(dur_tgt.sum(dim=1), mel_lens))
+            assert torch.all(torch.eq(dur_tgt.sum(dim=1), mel_lens))
 
-        # Predict durations
-        log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)
-        dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration)
+            # Predict durations
+            log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)
+            dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration)
+
+        elif self.duration_extraction_method == 'textgrid':
+            dur_tgt = duration
+            log_dur_pred = self.duration_predictor(enc_out, enc_mask)
+            dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration)
+            attn_soft = None 
+            attn_hard = None
+            attn_hard_dur = None
+            attn_logprob = None
+
+            assert torch.all(torch.eq(dur_tgt.sum(dim=1), mel_lens))
+
 
         # Predict pitch
-        pitch_pred = self.pitch_predictor(enc_out, enc_mask).permute(0, 2, 1) #maybe we want to condition pitch prediction on the conditioning parameter.
+        pitch_pred = self.pitch_predictor(enc_out, enc_mask).permute(0, 2, 1)
 
         # Average pitch over characters
         pitch_tgt = average_pitch(pitch_dense, dur_tgt)

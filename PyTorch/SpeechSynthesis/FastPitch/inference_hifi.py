@@ -48,7 +48,7 @@ from common.tb_dllogger import (init_inference_metadata, stdout_metric_format,
 from common.text import cmudict
 from common.text.text_processing import TextProcessing
 from pitch_transform import pitch_transform_custom
-
+from hifigan.denoiser import Denoiser
 
 def parse_args(parser):
     """
@@ -75,6 +75,8 @@ def parse_args(parser):
                         help='Sampling rate')
     parser.add_argument('--stft-hop-length', type=int, default=256,
                         help='STFT hop length for estimating audio length from mel size')
+    parser.add_argument('--denoising-strength', default=0.0, type=float,
+                         help='Capture and subtract HiFi-GAN model bias to enhance audio')
     parser.add_argument('--amp', action='store_true',
                         help='Inference with AMP')
     parser.add_argument('-bs', '--batch-size', type=int, default=64)
@@ -125,6 +127,9 @@ def parse_args(parser):
                       help='Number of speakers in the model.')
     cond.add_argument('--n-conditions', type=int, default=1,
                       help='Number of discrete conditions in the model.')
+    cond.add_argument('--duration-extraction-method', default='attn_prior',
+                      choices=['attn_prior', 'textgrid'],
+                      help='Choose method for extracting and modelling duration')
     return parser
 
 
@@ -326,6 +331,12 @@ def main():
             vocoder = load_and_setup_model(
                 'HiFi-GAN', parser, args.hifigan, args.amp, device,
                 unk_args=unk_args, forward_is_infer=True, ema=args.ema)
+            if args.denoising_strength > 0.0:
+                print("USE DENOISER")
+                denoiser = Denoiser(
+                    vocoder, sr=args.sampling_rate, hop_length=args.stft_hop_length).to(device)
+            else:
+                denoiser = None
     else:
         vocoder = None
 
@@ -345,6 +356,8 @@ def main():
                 mel, *_ = generator(b['text'])
             if vocoder is not None:
                 audios = vocoder(mel)
+                if denoiser is not None:
+                    audios = denoiser(audios.squeeze(1), args.denoising_strength)
 
     gen_measures = MeasureTime(cuda=args.cuda)
     vocoder_measures = MeasureTime(cuda=args.cuda)
@@ -392,6 +405,8 @@ def main():
             if vocoder is not None:
                 with torch.no_grad(), vocoder_measures:
                     audios = vocoder(mel)
+                    if denoiser is not None:
+                        audios = denoiser(audios.squeeze(1), args.denoising_strength)
                     audios = audios.squeeze()
                 all_utterances += len(audios)
                 all_samples += sum(audio.size(0) for audio in audios)
