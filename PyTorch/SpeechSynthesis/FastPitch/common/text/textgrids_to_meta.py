@@ -8,8 +8,6 @@ import numpy as np
 import tgt
 import tqdm
 
-
-# TODO: this is also defined in extract_mels.py, pull out to common utils?
 def parse_textgrid(tier, sampling_rate, hop_length):
     # latest MFA replaces silence phones with "" in output TextGrids
     sil_phones = ["sil", "sp", "spn", ""]
@@ -41,6 +39,8 @@ if __name__ == '__main__':
          help='Directory containing TextGrids to process.')
     parser.add_argument('meta_out', type=str,
         help='Output metadata file to write.')
+    parser.add_argument('wav_dir', type=str,
+        help='Directory of audiofiles.')
     parser.add_argument('-sr', '--sampling_rate', type=int, default=22050,
         help='Sampling rate of aligned audio files. Default 22050 Hz.')
     parser.add_argument('--hop_length', type=int, default=256,
@@ -48,6 +48,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     with open(args.meta_out, 'w') as outf:
+        outf.write('{}|{}|{}\n'.format('mels', 'transcription', 'textgrid'))
         tg_files = glob.glob(os.path.join(args.textgrid_dir, '*.TextGrid'))
         for tgf in tqdm.tqdm(tg_files):
             try:
@@ -60,5 +61,6 @@ if __name__ == '__main__':
                 args.sampling_rate,
                 args.hop_length)
             # almost certainly wrong given MFA filenames: fix it after
-            wav_file = tgf.replace('TextGrid', 'wav')
+            fname = os.path.basename(tgf).replace('TextGrid', 'wav')
+            wav_file = f"{args.wav_dir}/{fname}"
             outf.write('{}|{{{}}}|{}\n'.format(wav_file, ' '.join(phones), tgf))

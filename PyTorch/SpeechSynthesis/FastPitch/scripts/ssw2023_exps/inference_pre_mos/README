@@ -1,0 +1,5 @@
+This directory loops over speakers with more than 10 minutes of training
+data and loops over baseline model checkpoints and denoiser values.
+
+This was used to initially pre-filter some speakers and the best ones
+are put to the MOS listening test for speaker selection.

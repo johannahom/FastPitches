@@ -269,7 +269,7 @@ class TTSDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         # Indexing items using dictionary entries
         audiopath = self.audiopaths_and_text[index]['mels']
-        text = self.audiopaths_and_text[index]['text']
+        #text = self.audiopaths_and_text[index]['text']
         speaker = None
         condition = None
         if self.n_speakers > 1:
@@ -291,6 +291,7 @@ class TTSDataset(torch.utils.data.Dataset):
         if self.input_type == 'transcription':
             text = self.get_text(self.audiopaths_and_text[index]['transcription'], encode_transcription=True)
         else:
+            text = self.audiopaths_and_text[index]['text'] #new change see commented out position above
             text = self.get_text(text)
 
         pitch = self.get_pitch(index, mel.size(-1), pitch_mean, pitch_std)
@@ -498,9 +499,13 @@ class TTSCollate:
         if batch[0][9] is not None:
             duration_padded = torch.LongTensor(len(batch), max_input_len)
             duration_padded.zero_()
+            dur_lens = torch.zeros(duration_padded.size(0), dtype=torch.int32) #added jo 26/10
             for i in range(len(ids_sorted_decreasing)):
                 duration = batch[ids_sorted_decreasing[i]][9]
-                duration_padded[i, :duration.size(1)] = duration #changed from 1 for Candor preprocess and LJ preprocess
+               # duration_padded[i, :duration.size(1)] = duration #changed from 1 for Candor preprocess and LJ preprocess
+                duration_padded[i, :duration.shape[1]] = duration #somehow 0 in prepare dataset and 1 in training
+                dur_lens[i] = duration.shape[1]
+                assert dur_lens[i] == input_lengths[i]
         else:
             duration_padded = None
 

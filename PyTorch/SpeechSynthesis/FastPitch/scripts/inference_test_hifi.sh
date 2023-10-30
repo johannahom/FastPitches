@@ -2,9 +2,10 @@
 export CUDA_VISIBLE_DEVICES=3
 : ${HIFIGAN:="/disk/scratch/s2132904/interspeech_2023/FastPitches/PyTorch/SpeechSynthesis/FastPitch/pretrained_models/hifigan/g_02500000"}
 : ${HIFIGAN_CONFIG:="/disk/scratch/s2132904/interspeech_2023/FastPitches/PyTorch/SpeechSynthesis/FastPitch/pretrained_models/hifigan/config.json"}
-: ${FASTPITCH:="/disk/scratch3/jomahony/interspeech2023_models/FastPitch_checkpoint_500.pt"}
+#: ${FASTPITCH:="/disk/scratch3/jomahony/ssw2023_models/fine-tune-ljBase200-candor-ssw-baseline/FastPitch_checkpoint_700.pt"}
+: ${FASTPITCH:="/disk/scratch3/jomahony/ssw2023_models/fine-tune-ljBase200-candor-ssw-condition/FastPitch_checkpoint_1000.pt"}
+: ${PHRASES:="/disk/scratch/s2132904/interspeech_2023/FastPitches/PyTorch/SpeechSynthesis/FastPitch/scripts/inference_test_candor.tsv"}
 : ${BATCH_SIZE:=20}
-: ${PHRASES:="/disk/scratch/s2132904/interspeech_2023/FastPitches/PyTorch/SpeechSynthesis/FastPitch/scripts/inference_test.tsv"}
 : ${OUTPUT_DIR:="./test_inference/audio_$(basename ${PHRASES} .tsv)"}
 : ${LOG_FILE:="$OUTPUT_DIR/nvlog_infer.json"}
 : ${AMP:=false}
@@ -16,10 +17,12 @@ export CUDA_VISIBLE_DEVICES=3
 : ${REPEATS:=1}
 : ${CPU:=false}
 
-: ${SPEAKER:=77}
-: ${NUM_SPEAKERS:=447}
+: ${SPEAKER:=64}
+: ${NUM_SPEAKERS:=500}
 : ${CONDITION:=2}
 : ${NUM_CONDITION:=3}
+: ${DURATION_EXTRACTION:=textgrid}
+: ${DENOISER_STRENGTH:=0.01}
 
 echo -e "\nAMP=$AMP, batch_size=$BATCH_SIZE\n"
 
@@ -38,6 +41,9 @@ ARGS+=" --speaker $SPEAKER"
 ARGS+=" --n-speakers $NUM_SPEAKERS"
 ARGS+=" --condition $CONDITION"
 ARGS+=" --n-conditions $NUM_CONDITION"
+ARGS+=" --duration-extraction-method $DURATION_EXTRACTION"
+ARGS+=" --denoising-strength $DENOISER_STRENGTH"
+
 [ "$CPU" = false ]          && ARGS+=" --cuda"
 [ "$CPU" = false ]          && ARGS+=" --cudnn-benchmark"
 [ "$AMP" = true ]           && ARGS+=" --amp"
