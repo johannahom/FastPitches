@@ -36,7 +36,7 @@ import torch
 import torch.nn.functional as F
 from scipy import ndimage
 from scipy.stats import betabinom
-
+import torch.nn.functional as F
 import common.layers as layers
 from common.text.text_processing import TextProcessing
 from common.utils import load_wav_to_torch, load_filepaths_and_text, to_gpu
@@ -205,6 +205,10 @@ class TTSDataset(torch.utils.data.Dataset):
                  use_betabinomial_interpolator=True,
                  pitch_online_method='pyin',
                  duration_extraction_method='attn_prior',
+                 phrase_level_leg_condition = False,
+                 word_level_leg_condition = False,
+                 phrase_level_cat_condition = False,
+                 word_level_cat_condition = False,
                  **ignored):
 
         # Expect a list of filenames
@@ -250,8 +254,20 @@ class TTSDataset(torch.utils.data.Dataset):
         if use_betabinomial_interpolator:
             self.betabinomial_interpolator = BetaBinomialInterpolator()
 
+         
+        #-------- word and phrase level conditioning ------#
+        # variables a bit verbose, might change
+        # currently you have to pass premade tensors so might change too
+        self.phrase_level_leg_condition = phrase_level_leg_condition
+        self.word_level_leg_condition = word_level_leg_condition
+        self.phrase_level_cat_condition = phrase_level_cat_condition
+        self.word_level_cat_condition = word_level_cat_condition
+
+        #--------------------------------------------------#
+
         expected_columns = (2 + int(load_pitch_from_disk) + (n_speakers > 1) + (n_conditions > 1))
-        print('EXPECTED COLUMNS IS ' + str(expected_columns))
+        #print('EXPECTED COLUMNS IS ' + str(expected_columns))
+        # @TODO Johannah: probably add more asserts for all features
         assert not (load_pitch_from_disk and self.pitch_tmp_dir is not None)
 
         if len(self.audiopaths_and_text[0]) < expected_columns:
@@ -270,12 +286,17 @@ class TTSDataset(torch.utils.data.Dataset):
         # Indexing items using dictionary entries
         audiopath = self.audiopaths_and_text[index]['mels']
         #text = self.audiopaths_and_text[index]['text']
+
+
         speaker = None
         condition = None
         if self.n_speakers > 1:
             speaker = int(self.audiopaths_and_text[index]['speaker'])
         if self.n_conditions > 1:
             condition = int(self.audiopaths_and_text[index]['condition'])
+
+        #------------------------------------------------------------------
+        # for by speaker normalisation (must be found in metadata)
 
         to_tensor = lambda x: torch.Tensor([x]) if type(x) is float else x
         if self.norm_pitch_by_speaker:
@@ -285,19 +306,28 @@ class TTSDataset(torch.utils.data.Dataset):
             pitch_mean = self.pitch_mean
             pitch_std = self.pitch_std
 
+        #------------------------------------------------------------------
+
         mel = self.get_mel(audiopath)
    
-        #if input is transcription, skip preprocessing and encode input directly
+        #------------------------------------------------------------------
+        # if input is phone transcription in metadat, skip preprocessing 
+        # and encode directly else, transcribe and encode text
+
         if self.input_type == 'transcription':
             text = self.get_text(self.audiopaths_and_text[index]['transcription'], encode_transcription=True)
         else:
-            text = self.audiopaths_and_text[index]['text'] #new change see commented out position above
+            text = self.audiopaths_and_text[index]['text']
             text = self.get_text(text)
 
         pitch = self.get_pitch(index, mel.size(-1), pitch_mean, pitch_std)
         energy = torch.norm(mel.float(), dim=0, p=2)
 
-        #duration extraction
+        #------------------------------------------------------------------
+        # duration extraction attn_prior uses built in aligner
+        # duration textgrid either parses textgrid or reads tensor or 
+        # durations if read from disk is true
+
         if self.duration_extraction_method == 'attn_prior':
             attn_prior = self.get_prior(index, mel.shape[1], text.shape[0])
             duration = None
@@ -307,12 +337,44 @@ class TTSDataset(torch.utils.data.Dataset):
 
         assert pitch.size(-1) == mel.size(-1)
 
-        # No higher formants?
+        # No higher formants? -- remove this at some point
         if len(pitch.size()) == 1:
             pitch = pitch[None, :]
 
+
+        #------------------------------------------------------------------
+        # Read in word and phrase conditioning tensors, right now all passed
+        # from disk
+
+        phrase_leg = None
+        word_leg = None
+        phrase_cat = None
+        word_cat = None
+
+        if self.phrase_level_leg_condition:
+            tensor_path = self.audiopaths_and_text[index]['slope_tensors']
+            phrase_leg = torch.load(tensor_path)
+            assert phrase_leg.size(dim=1) == len(text)
+
+        if self.word_level_leg_condition:
+            tensor_path = self.audiopaths_and_text[index]['leg_word_tensors']
+            word_leg = torch.load(tensor_path)
+            assert word_leg.size(dim=1) == len(text)
+
+        if self.phrase_level_cat_condition:
+            tensor_path = self.audiopaths_and_text[index]['boundary_tensors']
+            phrase_cat = torch.load(tensor_path)
+            #print(torch.max(phrase_cat), self.audiopaths_and_text[index]['boundary_tensors'])
+            assert phrase_cat.size(dim=1) == len(text)
+
+        if self.word_level_cat_condition:
+            tensor_path = self.audiopaths_and_text[index]['prominence_tensors']
+            word_cat = torch.load(tensor_path)
+            assert word_cat.size(dim=1) == len(text)
+
+
         return (text, mel, len(text), pitch, energy, speaker, attn_prior,
-                audiopath, condition, duration)
+                audiopath, condition, duration, phrase_leg, word_leg, phrase_cat, word_cat)
 
     def __len__(self):
         return len(self.audiopaths_and_text)
@@ -376,9 +438,8 @@ class TTSDataset(torch.utils.data.Dataset):
         return attn_prior
 
     def get_durations_textgrid(self, index, mel_len):
-        #TODO maybe change naming of attn_prior to something else later as it is not attn_prior
         if self.load_duration_from_disk:
-            durpath = self.audiopaths_and_text[index]['durations']
+            durpath = self.audiopaths_and_text[index]['duration']
             durations = torch.load(durpath)
         else:
             durpath = self.audiopaths_and_text[index]['textgrid']
@@ -426,7 +487,23 @@ class TTSDataset(torch.utils.data.Dataset):
 
 
 class TTSCollate:
-    """Zero-pads model inputs and targets based on number of frames per step"""
+    """Zero-pads model inputs and targets based on number of frames per step
+    Batch indices
+    0: text 
+    1: mel
+    2: len(text)
+    3: pitch
+    4: energy
+    5: speaker
+    6: attn_prior
+    7: audiopath
+    8: condition
+    9: duration
+    10: phrase_leg
+    11: word_leg
+    12: phrase_cat
+    13: word_cat 
+    """
 
     def __call__(self, batch):
         """Collate training batch from normalized text and mel-spec"""
@@ -503,20 +580,67 @@ class TTSCollate:
             for i in range(len(ids_sorted_decreasing)):
                 duration = batch[ids_sorted_decreasing[i]][9]
                # duration_padded[i, :duration.size(1)] = duration #changed from 1 for Candor preprocess and LJ preprocess
-                duration_padded[i, :duration.shape[1]] = duration #somehow 0 in prepare dataset and 1 in training
-                dur_lens[i] = duration.shape[1]
+                duration_padded[i, :duration.shape[0]] = duration #somehow 0 in prepare dataset and 1 in training
+                dur_lens[i] = duration.shape[0]
+
                 assert dur_lens[i] == input_lengths[i]
         else:
             duration_padded = None
 
+   # 10: phrase_leg
+   # 11: word_leg
+   # 12: phrase_cat
+   # 13: word_cat
+
+        if batch[0][10] is not None:
+            phrase_leg_padded = torch.zeros(len(batch), max_input_len, dtype=batch[0][10].dtype)
+            for i in range(len(ids_sorted_decreasing)):
+                phrase_leg = batch[ids_sorted_decreasing[i]][10] # [1,seq_len]
+                #phrase_leg_padded = F.pad(input=phrase_leg, pad=(0, max_input_len-phrase_leg.size(1)), mode='constant', value=0)
+                phrase_leg_padded[i, :phrase_leg.shape[1]] = phrase_leg
+        else:
+            phrase_leg_padded = None
+
+
+        if batch[0][11] is not None:
+            n_coeffs = batch[0][11].shape[0]
+            word_leg_padded = torch.zeros(len(batch), n_coeffs,
+                                          max_input_len, dtype=batch[0][11].dtype)
+            
+            for i in range(len(ids_sorted_decreasing)):
+                word_leg = batch[ids_sorted_decreasing[i]][11]
+                word_leg_padded[i, :, :word_leg.shape[1]] = word_leg
+                #print(word_leg_padded.size())
+        else:
+            word_leg_padded = None
+
+        if batch[0][12] is not None:
+            phrase_cat_padded = torch.zeros(len(batch), max_input_len)
+            for i in range(len(ids_sorted_decreasing)):
+                phrase_cat = batch[ids_sorted_decreasing[i]][12]
+                phrase_cat_padded[i, :phrase_cat.shape[1]] = phrase_cat
+        else:
+            phrase_cat_padded = None
+
+        if batch[0][13] is not None:
+            word_cat_padded = torch.zeros(len(batch), max_input_len)
+            for i in range(len(ids_sorted_decreasing)):
+                word_cat = batch[ids_sorted_decreasing[i]][13]
+                word_cat_padded[i, :word_cat.shape[1]] = word_cat
+        else:
+            word_cat_padded = None
+
         return (text_padded, input_lengths, mel_padded, output_lengths, len_x,
                 pitch_padded, energy_padded, speaker, attn_prior_padded,
-                audiopaths, condition, duration_padded)
+                audiopaths, condition, duration_padded, phrase_leg_padded,
+                word_leg_padded, phrase_cat_padded, word_cat_padded)
 
 
 def batch_to_gpu(batch):
     (text_padded, input_lengths, mel_padded, output_lengths, len_x,
-     pitch_padded, energy_padded, speaker, attn_prior, audiopaths, condition, duration_padded) = batch
+     pitch_padded, energy_padded, speaker, attn_prior, audiopaths, 
+     condition, duration_padded, phrase_leg_padded, 
+     word_leg_padded, phrase_cat_padded, word_cat_padded) = batch
 
     text_padded = to_gpu(text_padded).long()
     input_lengths = to_gpu(input_lengths).long()
@@ -524,6 +648,7 @@ def batch_to_gpu(batch):
     output_lengths = to_gpu(output_lengths).long()
     pitch_padded = to_gpu(pitch_padded).float()
     energy_padded = to_gpu(energy_padded).float()
+
     if attn_prior is not None:
         attn_prior = to_gpu(attn_prior).float()
     if speaker is not None:
@@ -532,10 +657,20 @@ def batch_to_gpu(batch):
         condition = to_gpu(condition).long()
     if duration_padded is not None:
         duration_padded = to_gpu(duration_padded).long()
+    if phrase_leg_padded is not None:
+        phrase_leg_padded = to_gpu(phrase_leg_padded).float()
+    if word_leg_padded is not None:
+        word_leg_padded = to_gpu(word_leg_padded).float()
+    if phrase_cat_padded is not None:
+        phrase_cat_padded = to_gpu(phrase_cat_padded).long()
+    if word_cat_padded is not None:
+        word_cat_padded = to_gpu(word_cat_padded).long()
 
     # Alignments act as both inputs and targets - pass shallow copies
     x = [text_padded, input_lengths, mel_padded, output_lengths,
-         pitch_padded, energy_padded, speaker, attn_prior, audiopaths, condition, duration_padded]
+         pitch_padded, energy_padded, speaker, attn_prior, audiopaths, 
+         condition, duration_padded, phrase_leg_padded, word_leg_padded,
+         phrase_cat_padded, word_cat_padded]
      
     y = [mel_padded, input_lengths, output_lengths, duration_padded]
     len_x = torch.sum(output_lengths)

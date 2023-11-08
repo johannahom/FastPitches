@@ -183,7 +183,7 @@ def main():
                     for j, dur in enumerate(duration):
                         fname = Path(fpaths[j]).with_suffix('.pt').name
                         fpath = Path(args.dataset_path, 'duration', fname)
-                        torch.save(torch.LongTensor(duration), fpath)
+                        torch.save(torch.LongTensor(duration).squeeze(), fpath)
                 #        torch.save(dur[:mel_lens[j], :dur[j]], fpath)
 
 

@@ -58,7 +58,6 @@ class FastPitchLoss(nn.Module):
             dur_pred = dur_pred.squeeze(2)
  
         dur_lens = in_lens
-#        print(dur_lens.shape)
 
         mel_tgt.requires_grad = False
         # (B,H,T) => (B,T,H)
@@ -68,8 +67,6 @@ class FastPitchLoss(nn.Module):
         dur_mask = mask_from_lens(dur_lens, max_len=dur_tgt.size(1))
         log_dur_tgt = torch.log(dur_tgt.float() + 1)
         loss_fn = F.mse_loss
-        #import pdb; pdb.set_trace()
-        print(log_dur_pred.size(), log_dur_tgt.size())
         dur_pred_loss = loss_fn(log_dur_pred, log_dur_tgt, reduction='none')
         dur_pred_loss = (dur_pred_loss * dur_mask).sum() / dur_mask.sum()
 

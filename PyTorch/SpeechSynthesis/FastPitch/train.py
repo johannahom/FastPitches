@@ -46,6 +46,7 @@ from matplotlib import pyplot as plt
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.profiler import profile, record_function, ProfilerActivity
 
 import models
 from common.text import cmudict
@@ -171,6 +172,17 @@ def parse_args(parser):
                       help='Choose method for extracting and modelling duration')
     cond.add_argument('--load-duration-from-disk', action='store_true',
                       help='Use durations cache on the disk')
+
+
+    word_phrase = parser.add_argument_group('word and phrase parameters')
+    word_phrase.add_argument('--phrase-level-leg-condition', action='store_true',
+                             help='Use slope to condition model on phrase-level')
+    word_phrase.add_argument('--word-level-leg-condition', action='store_true',
+                             help='Use coefficients to condition model on word-level')
+    word_phrase.add_argument('--phrase-level-cat-condition', action='store_true',
+                             help='Use categorical boundaries to condition model on phrase-level')
+    word_phrase.add_argument('--word-level-cat-condition', action='store_true',
+                             help='Use categorical prominence to condition model on word-level')
 
     audio = parser.add_argument_group('audio parameters')
     audio.add_argument('--max-wav-value', default=32768.0, type=float,
@@ -352,7 +364,6 @@ def plot_batch_mels(pred_tgt_lists, rank):
     for mel_pitch_energy in pred_tgt_lists:
         #print(mel_pitch_energy)
         mels = mel_pitch_energy[0]
-        #print(mels.size())
         if mels.size(dim=2) == 80:  # tgt and pred mel have diff dimension order
             mels = mels.permute(0, 2, 1)
         mel_lens = mel_pitch_energy[-1]
@@ -383,7 +394,8 @@ def plot_batch_mels(pred_tgt_lists, rank):
 def log_validation_batch(x, y_pred, rank):
     x_fields = ['text_padded', 'input_lengths', 'mel_padded',
                 'output_lengths', 'pitch_padded', 'energy_padded',
-                'speaker', 'attn_prior', 'audiopaths', 'condition', 'duration_padded']
+                'speaker', 'attn_prior', 'audiopaths', 'condition', 'duration_padded','phrase_leg_padded',
+                'word_leg_padded', 'phrase_cat_padded', 'word_cat_padded']
     y_pred_fields = ['mel_out', 'dec_mask', 'dur_pred', 'log_dur_pred',
                      'pitch_pred', 'pitch_tgt', 'energy_pred',
                      'energy_tgt', 'attn_soft', 'attn_hard',
@@ -678,9 +690,10 @@ def main():
             x, y, num_frames = batch_to_gpu(batch)
 
             with torch.cuda.amp.autocast(enabled=args.amp):
+
                 y_pred = model(x)
                 loss, meta = criterion(y_pred, y)
-
+    
                 if args.duration_extraction_method == 'attn_prior':
                     if (args.kl_loss_start_epoch is not None
                             and epoch >= args.kl_loss_start_epoch):
@@ -807,6 +820,7 @@ def main():
                               total_iter, model_config)
 
     # Finished training
+    #print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
     if len(bmark_stats) > 0:
         log(bmark_stats.get(args.benchmark_epochs_num), args.local_rank)
 

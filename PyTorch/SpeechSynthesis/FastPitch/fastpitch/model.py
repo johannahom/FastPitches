@@ -128,6 +128,8 @@ class FastPitch(nn.Module):
                  energy_embedding_kernel_size,
                  n_speakers, speaker_emb_weight, n_conditions,
                  condition_emb_weight, duration_extraction_method,
+                 phrase_level_leg_condition, word_level_leg_condition,
+                 phrase_level_cat_condition, word_level_cat_condition,
                  pitch_conditioning_formants=1):
         super(FastPitch, self).__init__()
 
@@ -213,6 +215,37 @@ class FastPitch(nn.Module):
                 kernel_size=energy_embedding_kernel_size,
                 padding=int((energy_embedding_kernel_size - 1) / 2))
 
+        #-------------- Word and Phrase Conditioning ----------------------
+
+        self.phrase_leg_cond = phrase_level_leg_condition
+        self.word_leg_cond = word_level_leg_condition
+        self.phrase_cat_cond = phrase_level_cat_condition
+        self.word_cat_cond = word_level_cat_condition
+
+        # Linear projection to embedding dim size
+        if self.phrase_leg_cond == True:
+            self.proj_phrase_leg_cond = nn.Linear(1, symbols_embedding_dim)
+
+        # Linear projection to embedding dim size
+        if self.word_leg_cond == True:
+            self.proj_word_leg_cond = nn.Linear(3, symbols_embedding_dim)
+
+        #Embedding for word_level_conditioning
+        if self.word_cat_cond == True:
+            self.word_level_emb = nn.Embedding(5, symbols_embedding_dim, 
+                                                padding_idx=padding_idx)
+        else:
+            self.word_level_emb = None
+
+        #Embedding for phrase_level_phrase_conditioning
+        if self.phrase_cat_cond == True:
+            self.phrase_level_emb = nn.Embedding(5, symbols_embedding_dim, 
+                                               padding_idx=padding_idx)
+        else:
+            self.phrase_level_emb = None
+
+        #-------------------------------------------------------------------
+
         self.proj = nn.Linear(out_fft_output_size, n_mel_channels, bias=True)
 
         self.attention = ConvAttention(
@@ -253,7 +286,8 @@ class FastPitch(nn.Module):
     def forward(self, inputs, use_gt_pitch=True, pace=1.0, max_duration=75):
 
         (inputs, input_lens, mel_tgt, mel_lens, pitch_dense, energy_dense,
-         speaker, attn_prior, audiopaths, condition, duration) = inputs
+         speaker, attn_prior, audiopaths, condition, duration, phrase_leg, word_leg,
+         phrase_cat, word_cat) = inputs
 
         mel_max_len = mel_tgt.size(2)
 
@@ -274,6 +308,49 @@ class FastPitch(nn.Module):
         # Input FFT
         enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, conditioning_2=cond_emb) #need to add condition conditioning here
         
+
+        #----------- Word and Phrase Conditioning -----------
+
+        if not self.phrase_leg_cond:
+            phrase_leg_out = 0
+
+        elif self.phrase_leg_cond: # SHAPE [B, seq_len]
+            assert phrase_leg is not None
+            phrase_leg = phrase_leg.unsqueeze(1) # [B, 1, max_seq_len]
+            phrase_leg = phrase_leg.permute(0, 2, 1) # [B, max_seq_len, 1]
+            phrase_leg_out = self.proj_phrase_leg_cond(phrase_leg)
+        
+        enc_out = enc_out + phrase_leg_out       
+
+        if not self.word_leg_cond:
+            word_leg_out = 0
+        elif self.word_leg_cond: # SHAPE [B, n_coeffs, max_seq_len] #TYPE, float
+            assert word_leg is not None
+            word_leg = word_leg.permute(0, 2, 1)
+            word_leg_out = self.proj_word_leg_cond(word_leg)
+
+        enc_out = enc_out + word_leg_out
+
+
+        if not self.phrase_cat_cond:
+            phrase_cat_out = 0
+        elif self.phrase_cat_cond:  # SHAPE [B, max_seq_len] TYPE, long
+            assert phrase_cat is not None
+            phrase_cat_out = self.phrase_level_emb(phrase_cat)
+
+        enc_out = enc_out + phrase_cat_out
+
+
+        if not self.word_cat_cond:
+            word_cat_out = 0
+        elif self.word_cat_cond:
+            assert word_cat is not None
+            word_cat_out = self.word_level_emb(word_cat)
+
+        enc_out = enc_out + word_cat_out
+
+
+
         #----------- Duration Prediction -------------
 
         if self.duration_extraction_method == 'attn_prior':
@@ -353,7 +430,9 @@ class FastPitch(nn.Module):
 
     def infer(self, inputs, pace=1.0, dur_tgt=None, pitch_tgt=None,
               energy_tgt=None, pitch_transform=None, max_duration=75,
-              speaker=0, condition=0):
+              speaker=0, condition=0, phrase_leg_tgt=None, word_leg_tgt=None,
+              phrase_cat_tgt=None, word_cat_tgt=None):
+
 
         if self.speaker_emb is None:
             spk_emb = 0
@@ -373,6 +452,33 @@ class FastPitch(nn.Module):
 
         # Input FFT
         enc_out, enc_mask = self.encoder(inputs, conditioning=spk_emb, conditioning_2=cond_emb) #need to add conditioning here but will it take list?
+
+
+        #---------- Phrase and Word Level Conditioning ---------------------
+        if phrase_leg_tgt is None:
+            phrase_leg_out = 0
+        else:
+            phrase_leg_tgt = phrase_leg_tgt.unsqueeze(1)
+            phrase_leg_tgt = phrase_leg_tgt.permute(0, 2, 1)
+            phrase_leg_out = self.proj_phrase_leg_cond(phrase_leg_tgt)
+
+        if word_leg_tgt is None:
+            word_leg_out = 0
+        else:
+            word_leg_tgt = word_leg_tgt.unsqueeze(1)
+            word_leg_tgt = word_leg_tgt.permute(0, 2, 1)
+            word_leg_out = self.word_phrase_leg_cond(word_leg_tgt)
+
+        if phrase_cat_tgt is None:
+            phrase_cat_out = 0
+        else:
+            phrase_cat_out = self.phrase_level_emb(phrase_cat_tgt)
+
+        if phrase_cat_tgt is None:
+            word_cat_out = 0
+        else:
+            word_cat_out = self.word_level_emb(word_cat_tgt)
+
 
         # Predict durations
         log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)

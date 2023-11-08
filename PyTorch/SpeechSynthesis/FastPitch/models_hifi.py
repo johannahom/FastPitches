@@ -140,6 +140,11 @@ def get_model_config(model_name, args):
             # energy conditioning
             energy_conditioning=args.energy_conditioning,
             energy_embedding_kernel_size=args.energy_embedding_kernel_size,
+            # word and phrase conditioning
+            phrase_level_leg_condition = args.phrase_level_leg_condition,
+            word_level_leg_condition = args.word_level_leg_condition,
+            phrase_level_cat_condition = args.phrase_level_cat_condition,
+            word_level_cat_condition = args.word_level_cat_condition
         )
         return model_config
 
