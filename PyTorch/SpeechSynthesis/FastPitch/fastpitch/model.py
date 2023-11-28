@@ -458,27 +458,26 @@ class FastPitch(nn.Module):
         if phrase_leg_tgt is None:
             phrase_leg_out = 0
         else:
-            phrase_leg_tgt = phrase_leg_tgt.unsqueeze(1)
-            phrase_leg_tgt = phrase_leg_tgt.permute(0, 2, 1)
             phrase_leg_out = self.proj_phrase_leg_cond(phrase_leg_tgt)
+            enc_out = enc_out + phrase_leg_out
 
         if word_leg_tgt is None:
             word_leg_out = 0
         else:
-            word_leg_tgt = word_leg_tgt.unsqueeze(1)
-            word_leg_tgt = word_leg_tgt.permute(0, 2, 1)
-            word_leg_out = self.word_phrase_leg_cond(word_leg_tgt)
-
+            word_leg_out = self.proj_word_leg_cond(word_leg_tgt)
+            enc_out = enc_out + word_leg_out
+ 
         if phrase_cat_tgt is None:
             phrase_cat_out = 0
         else:
             phrase_cat_out = self.phrase_level_emb(phrase_cat_tgt)
+        enc_out = enc_out + phrase_cat_out            
 
         if phrase_cat_tgt is None:
             word_cat_out = 0
         else:
             word_cat_out = self.word_level_emb(word_cat_tgt)
-
+        enc_out = enc_out + word_cat_out
 
         # Predict durations
         log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)

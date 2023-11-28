@@ -130,6 +130,16 @@ def parse_args(parser):
     cond.add_argument('--duration-extraction-method', default='attn_prior',
                       choices=['attn_prior', 'textgrid'],
                       help='Choose method for extracting and modelling duration')
+    word_phrase = parser.add_argument_group('word and phrase parameters')
+    word_phrase.add_argument('--phrase-level-leg-condition', action='store_true',
+                             help='Use slope to condition model on phrase-level')
+    word_phrase.add_argument('--word-level-leg-condition', action='store_true',
+                             help='Use coefficients to condition model on word-level')
+    word_phrase.add_argument('--phrase-level-cat-condition', action='store_true',
+                             help='Use categorical boundaries to condition model on phrase-level')
+    word_phrase.add_argument('--word-level-cat-condition', action='store_true',
+                             help='Use categorical prominence to condition model on word-level')
+
     return parser
 
 
@@ -198,10 +208,12 @@ def load_fields(fpath):
 
 def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
                            batch_size=128, dataset=None, load_mels=False,
-                           load_pitch=False, p_arpabet=0.0):
+                           load_pitch=False, p_arpabet=0.0, phrase_level_leg_condition=False,
+                           word_level_leg_condition=False, phrase_level_cat_condition=False,
+                           word_level_cat_condition=False):
+
     tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
-    print(fields)
-    fields['text'] = [torch.LongTensor(tp.encode_text(text))
+    fields['text'] = [torch.LongTensor(tp.text_to_sequence(text)) 
                       for text in fields['text']]
     order = np.argsort([-t.size(0) for t in fields['text']])
 
@@ -226,6 +238,38 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
     if 'output' in fields:
         fields['output'] = [fields['output'][i] for i in order]
 
+
+    if word_level_leg_condition:
+        assert 'word_leg' in fields
+        fields['word_leg'] = [
+            torch.load(fields['word_leg'][i]).float().permute(1,0) for i in order]
+    else:
+        fields['word_leg'] = [None for i in order]
+
+    if phrase_level_leg_condition:
+        assert 'phrase_leg' in fields
+        fields['phrase_leg'] = [
+            torch.load(fields['phrase_leg'][i]).float().permute(1,0) for i in order]
+    else:
+        fields['phrase_leg'] = [None for i in order]
+
+    if phrase_level_cat_condition:
+        assert 'phrase_cat' in fields
+        fields['phrase_cat'] = [
+            torch.load(Path(dataset, fields['phrase_cat'][i])) for i in order]
+    else:
+        fields['phrase_cat'] = [None for i in order]
+
+    if word_level_cat_condition:
+        assert 'word_cat' in fields
+        fields['word_cat'] = [
+            torch.load(Path(dataset, fields['word_cat'][i])) for i in order]
+    else:
+        fields['word_cat'] = [None for i in order]
+
+
+
+
     # cut into batches & pad
     batches = []
     for b in range(0, len(order), batch_size):
@@ -237,7 +281,14 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
                 batch[f] = pad_sequence(batch[f], batch_first=True).permute(0, 2, 1)
             elif f == 'pitch' and load_pitch:
                 batch[f] = pad_sequence(batch[f], batch_first=True)
-
+            elif f == 'word_leg' and word_level_leg_condition:
+                batch[f] = pad_sequence(batch[f], batch_first=True)
+            elif f == 'phrase_leg' and phrase_level_leg_condition:
+                batch[f] = pad_sequence(batch[f], batch_first=True)
+            elif f == 'word_cat' and word_level_cat_condition:
+                batch[f] = pad_sequence(batch[f], batch_first=True)
+            elif f == 'phrase_cat' and phrase_level_cat_condition:
+                batch[f] = pad_sequence(batch[f], batch_first=True)
             if type(batch[f]) is torch.Tensor:
                 batch[f] = batch[f].to(device)
         batches.append(batch)
@@ -346,7 +397,11 @@ def main():
     fields = load_fields(args.input)
     batches = prepare_input_sequence(
         fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
-        args.dataset_path, load_mels=(generator is None), p_arpabet=args.p_arpabet)
+        args.dataset_path, load_mels=(generator is None), p_arpabet=args.p_arpabet, 
+        phrase_level_leg_condition=args.phrase_level_leg_condition,
+        word_level_leg_condition=args.word_level_leg_condition,
+        phrase_level_cat_condition=args.phrase_level_cat_condition,
+        word_level_cat_condition=args.word_level_cat_condition)
 
     # Use real data rather than synthetic - FastPitch predicts len
     for _ in tqdm(range(args.warmup_steps), 'Warmup'):
@@ -387,7 +442,9 @@ def main():
                 mel, mel_lens = b['mel'], b['mel_lens']
             else:
                 with torch.no_grad(), gen_measures:
-                    mel, mel_lens, *_ = generator(b['text'], **gen_kw)
+                    mel, mel_lens, *_ = generator(b['text'], **gen_kw, phrase_leg_tgt=b['phrase_leg'],
+                                                 word_leg_tgt=b['word_leg'], phrase_cat_tgt=b['phrase_cat'][0],
+                                                 word_cat_tgt=b['word_cat'][0])
 
                 gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
                 all_letters += b['text_lens'].sum().item()
