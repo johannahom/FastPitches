@@ -473,7 +473,7 @@ class FastPitch(nn.Module):
             phrase_cat_out = self.phrase_level_emb(phrase_cat_tgt)
         enc_out = enc_out + phrase_cat_out            
 
-        if phrase_cat_tgt is None:
+        if word_cat_tgt is None:
             word_cat_out = 0
         else:
             word_cat_out = self.word_level_emb(word_cat_tgt)
@@ -481,10 +481,9 @@ class FastPitch(nn.Module):
 
         # Predict durations
         log_dur_pred = self.duration_predictor(enc_out, enc_mask).squeeze(-1)
-        dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration)
-
+        dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration) #[b x seq_len]
         # Pitch over chars
-        pitch_pred = self.pitch_predictor(enc_out, enc_mask).permute(0, 2, 1)
+        pitch_pred = self.pitch_predictor(enc_out, enc_mask).permute(0, 2, 1) #[b x seq_len x 1]
 
         if pitch_transform is not None:
             if self.pitch_std[0] == 0.0:
@@ -497,7 +496,8 @@ class FastPitch(nn.Module):
         if pitch_tgt is None:
             pitch_emb = self.pitch_emb(pitch_pred).transpose(1, 2)
         else:
-            pitch_emb = self.pitch_emb(pitch_tgt).transpose(1, 2)
+            #print(pitch_tgt.permute().size())
+            pitch_emb = self.pitch_emb(pitch_tgt.permute(0, 2, 1)).transpose(1, 2)
 
         enc_out = enc_out + pitch_emb
 
@@ -513,7 +513,7 @@ class FastPitch(nn.Module):
             enc_out = enc_out + energy_emb
         else:
             energy_pred = None
-
+        print(dur_tgt)
         len_regulated, dec_lens = regulate_len(
             dur_pred if dur_tgt is None else dur_tgt,
             enc_out, pace, mel_max_len=None)

@@ -130,6 +130,11 @@ def parse_args(parser):
     cond.add_argument('--duration-extraction-method', default='attn_prior',
                       choices=['attn_prior', 'textgrid'],
                       help='Choose method for extracting and modelling duration')
+    cond.add_argument('--load-duration', action='store_true',
+                             help='Provide a duration target for inference')
+    cond.add_argument('--load-pitch', action='store_true',
+                             help='Provide a pitch target for inference')
+
     word_phrase = parser.add_argument_group('word and phrase parameters')
     word_phrase.add_argument('--phrase-level-leg-condition', action='store_true',
                              help='Use slope to condition model on phrase-level')
@@ -210,16 +215,14 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
                            batch_size=128, dataset=None, load_mels=False,
                            load_pitch=False, p_arpabet=0.0, phrase_level_leg_condition=False,
                            word_level_leg_condition=False, phrase_level_cat_condition=False,
-                           word_level_cat_condition=False):
+                           word_level_cat_condition=False, load_duration=False):
 
     tp = TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
     fields['text'] = [torch.LongTensor(tp.text_to_sequence(text)) 
                       for text in fields['text']]
     order = np.argsort([-t.size(0) for t in fields['text']])
-
     fields['text'] = [fields['text'][i] for i in order]
     fields['text_lens'] = torch.LongTensor([t.size(0) for t in fields['text']])
-
     for t in fields['text']:
         print(tp.sequence_to_text(t.numpy()))
 
@@ -232,8 +235,15 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
     if load_pitch:
         assert 'pitch' in fields
         fields['pitch'] = [
-            torch.load(Path(dataset, fields['pitch'][i])) for i in order]
+            torch.load(fields['pitch'][i]).float().permute(1,0) for i in order]
         fields['pitch_lens'] = torch.LongTensor([t.size(0) for t in fields['pitch']])
+
+    if load_duration:
+        assert 'duration' in fields
+        fields['duration'] = [
+            torch.load(fields['duration'][i]) for i in order]
+        fields['dur_lens'] = torch.LongTensor([t.size(0) for t in fields['duration']])
+
 
     if 'output' in fields:
         fields['output'] = [fields['output'][i] for i in order]
@@ -255,15 +265,18 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
 
     if phrase_level_cat_condition:
         assert 'phrase_cat' in fields
+        print(fields['phrase_cat'])
         fields['phrase_cat'] = [
-            torch.load(Path(dataset, fields['phrase_cat'][i])) for i in order]
+            torch.load(fields['phrase_cat'][i]).long().squeeze(0) for i in order]
+        for x in fields['phrase_cat']:
+            print(x.size())
     else:
         fields['phrase_cat'] = [None for i in order]
 
     if word_level_cat_condition:
         assert 'word_cat' in fields
         fields['word_cat'] = [
-            torch.load(Path(dataset, fields['word_cat'][i])) for i in order]
+            torch.load(fields['word_cat'][i]).long().squeeze(0) for i in order]
     else:
         fields['word_cat'] = [None for i in order]
 
@@ -280,6 +293,8 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
             elif f == 'mel' and load_mels:
                 batch[f] = pad_sequence(batch[f], batch_first=True).permute(0, 2, 1)
             elif f == 'pitch' and load_pitch:
+                batch[f] = pad_sequence(batch[f], batch_first=True)
+            elif f == 'duration' and load_duration:
                 batch[f] = pad_sequence(batch[f], batch_first=True)
             elif f == 'word_leg' and word_level_leg_condition:
                 batch[f] = pad_sequence(batch[f], batch_first=True)
@@ -397,11 +412,11 @@ def main():
     fields = load_fields(args.input)
     batches = prepare_input_sequence(
         fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
-        args.dataset_path, load_mels=(generator is None), p_arpabet=args.p_arpabet, 
+        args.dataset_path, load_mels=(generator is None), load_pitch=args.load_pitch, p_arpabet=args.p_arpabet, 
         phrase_level_leg_condition=args.phrase_level_leg_condition,
         word_level_leg_condition=args.word_level_leg_condition,
         phrase_level_cat_condition=args.phrase_level_cat_condition,
-        word_level_cat_condition=args.word_level_cat_condition)
+        word_level_cat_condition=args.word_level_cat_condition, load_duration=args.load_duration)
 
     # Use real data rather than synthetic - FastPitch predicts len
     for _ in tqdm(range(args.warmup_steps), 'Warmup'):
@@ -420,7 +435,7 @@ def main():
     gen_kw = {'pace': args.pace,
               'speaker': args.speaker,
               'condition': args.condition, #@Johannah have to add condition here
-              'pitch_tgt': None,
+             # 'pitch_tgt': None,
               'pitch_transform': build_pitch_transformation(args)}
     if args.torchscript:
         gen_kw.pop('pitch_transform')
@@ -441,10 +456,36 @@ def main():
                 log(rep, {'Synthesizing from ground truth mels'})
                 mel, mel_lens = b['mel'], b['mel_lens']
             else:
+                if args.phrase_level_leg_condition:
+                    phrase_leg = b['phrase_leg']
+                else:
+                    phrase_leg = None
+                if args.word_level_leg_condition:
+                    word_leg = b['word_leg']
+                else:
+                    word_leg = None
+                if args.phrase_level_cat_condition:
+                    phrase_cat = b['phrase_cat']
+                else:
+                    phrase_cat = None
+                if args.word_level_cat_condition:
+                    word_cat = b['word_cat']
+                else:
+                    word_cat = None
+                if args.load_pitch:
+                    pitch_gt = b['pitch']
+                else:
+                    pitch_gt = None
+                if args.load_duration:
+                    dur_gt = b['duration']
+                else:
+                    dur_gt = None
+
                 with torch.no_grad(), gen_measures:
-                    mel, mel_lens, *_ = generator(b['text'], **gen_kw, phrase_leg_tgt=b['phrase_leg'],
-                                                 word_leg_tgt=b['word_leg'], phrase_cat_tgt=b['phrase_cat'][0],
-                                                 word_cat_tgt=b['word_cat'][0])
+                    mel, mel_lens, *_ = generator(b['text'], **gen_kw, pitch_tgt=pitch_gt, dur_tgt=dur_gt,
+                                                 phrase_leg_tgt=phrase_leg,
+                                                 word_leg_tgt=word_leg, phrase_cat_tgt=phrase_cat,
+                                                 word_cat_tgt=word_cat)
 
                 gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
                 all_letters += b['text_lens'].sum().item()
@@ -456,9 +497,9 @@ def main():
                     for i, mel_ in enumerate(mel):
                         m = mel_[:, :mel_lens[i].item()].permute(1, 0)
                         fname = b['output'][i] if 'output' in b else f'mel_{i}.npy'
-                        mel_path = Path(args.output, Path(fname).stem + '.npy')
-                        np.save(mel_path, m.cpu().numpy())
-
+                        mel_path = Path(args.output, Path(fname).stem + '.pt')#'.npy')
+                        #np.save(mel_path, m.cpu().numpy())
+                        torch.save(m.cpu(), mel_path)
             if vocoder is not None:
                 with torch.no_grad(), vocoder_measures:
                     audios = vocoder(mel)
